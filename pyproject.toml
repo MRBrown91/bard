@@ -16,6 +16,11 @@ dependencies = [
     "uvicorn[standard]>=0.35,<1",
 ]
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "alembic*"]
+exclude = ["tests*", "devtools*"]
+
 [project.optional-dependencies]
 dev = [
     "httpx>=0.28,<1",

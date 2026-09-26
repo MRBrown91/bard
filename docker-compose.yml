@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: bard
       POSTGRES_PASSWORD: bard
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - bard_postgres:/var/lib/postgresql/data
     healthcheck:
