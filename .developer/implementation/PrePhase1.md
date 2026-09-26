@@ -89,7 +89,7 @@ app/models/
 
 ## PP1.3 — Fix FK Delete Behavior to RESTRICT
 
-**Status:** `Approved`
+**Status:** `Completed` (commit: df7dd41)
 
 **Goal:** Change cascade deletes to `RESTRICT` on all FKs from fact/relationship/event tables to `campaigns` and `entities` to preserve provenance on soft delete.
 
