@@ -15,7 +15,7 @@
 
 ## PP1.1 — Split Domain Models into Cohesive Modules
 
-**Status:** `Approved`
+**Status:** `Completed` (commit: c6f70e3)
 
 **Goal:** Replace `app/models/domain.py` (394 lines, 21 models) with domain-cohesive modules.
 

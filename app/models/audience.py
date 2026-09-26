@@ -24,7 +24,10 @@ class EntityFactAudience(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         PGUUID(as_uuid=True), ForeignKey("players.entity_id")
     )
 
-    __table_args__ = (Index("ix_fact_audiences_fact_id", "fact_id"),)
+    __table_args__ = (
+        Index("ix_fact_audiences_fact_id", "fact_id"),
+        Index("ix_fact_audiences_player_id", "player_id"),
+    )
 
 
 class EntityRelationshipFactAudience(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -44,4 +47,7 @@ class EntityRelationshipFactAudience(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         PGUUID(as_uuid=True), ForeignKey("players.entity_id")
     )
 
-    __table_args__ = (Index("ix_relationship_fact_audiences_fact_id", "fact_id"),)
+    __table_args__ = (
+        Index("ix_relationship_fact_audiences_fact_id", "fact_id"),
+        Index("ix_relationship_fact_audiences_player_id", "player_id"),
+    )

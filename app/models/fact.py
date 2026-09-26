@@ -76,6 +76,8 @@ class EntityRelationshipFact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "campaign_id",
             "target_entity_id",
         ),
+        Index("ix_relationship_facts_source_entity_id", "source_entity_id"),
+        Index("ix_relationship_facts_target_entity_id", "target_entity_id"),
         Index("ix_relationship_facts_statement_id", "statement_id"),
         Index("ix_relationship_facts_event_id", "event_id"),
     )

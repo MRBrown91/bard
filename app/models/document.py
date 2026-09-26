@@ -26,7 +26,10 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     source_type: Mapped[str | None] = mapped_column(String(50))
     source_reference: Mapped[str | None] = mapped_column(String(500))
 
-    __table_args__ = (Index("ix_documents_campaign_id", "campaign_id"),)
+    __table_args__ = (
+        Index("ix_documents_campaign_id", "campaign_id"),
+        Index("ix_documents_session_id", "session_id"),
+    )
 
 
 class DocumentStatement(UUIDPrimaryKeyMixin, TimestampMixin, Base):

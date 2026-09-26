@@ -37,4 +37,7 @@ class EntityAlias(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     alias: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    __table_args__ = (Index("ix_entity_aliases_entity_id", "entity_id"),)
+    __table_args__ = (
+        Index("ix_entity_aliases_entity_id", "entity_id"),
+        Index("uq_entity_aliases_entity_alias", "entity_id", "alias", unique=True),
+    )
