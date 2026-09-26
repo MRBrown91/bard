@@ -60,7 +60,7 @@ app/models/
 
 ## PP1.2 — Add Missing Indexes & Unique Constraints
 
-**Status:** `Approved`
+**Status:** `Completed` (commit: aa18b5a)
 
 **Goal:** Add database indexes and constraints identified in Architecture Takeover Report.
 
