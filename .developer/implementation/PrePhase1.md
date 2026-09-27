@@ -15,7 +15,7 @@
 
 ## PP1.1 — Split Domain Models into Cohesive Modules
 
-**Status:** `Approved`
+**Status:** `Completed` (commit: c6f70e3)
 
 **Goal:** Replace `app/models/domain.py` (394 lines, 21 models) with domain-cohesive modules.
 
@@ -60,7 +60,7 @@ app/models/
 
 ## PP1.2 — Add Missing Indexes & Unique Constraints
 
-**Status:** `Approved`
+**Status:** `Completed` (commit: aa18b5a)
 
 **Goal:** Add database indexes and constraints identified in Architecture Takeover Report.
 
@@ -89,7 +89,7 @@ app/models/
 
 ## PP1.3 — Fix FK Delete Behavior to RESTRICT
 
-**Status:** `Approved`
+**Status:** `Completed` (commit: df7dd41)
 
 **Goal:** Change cascade deletes to `RESTRICT` on all FKs from fact/relationship/event tables to `campaigns` and `entities` to preserve provenance on soft delete.
 
@@ -132,7 +132,7 @@ app/models/
 
 ## PP1.4 — Create Repository Base & Campaign-Scoped Query Pattern
 
-**Status:** `Planning`
+**Status:** `Completed` (commit: 9dbf192)
 
 **Goal:** Establish repository layer with automatic campaign isolation.
 
@@ -178,7 +178,7 @@ class BaseRepository:
 
 ## PP1.5 — Create Pydantic Schemas (API Boundaries)
 
-**Status:** `Planning`
+**Status:** `Completed` (commit: 9c5b691)
 
 **Goal:** Define request/response models for all Phase 1 APIs.
 
@@ -217,7 +217,7 @@ app/schemas/
 
 ## PP1.6 — Implement Stub OIDC Auth Provider Interface
 
-**Status:** `Planning`
+**Status:** `Completed` (commit: cf63533)
 
 **Goal:** Define authentication interface and stub implementation for local dev.
 
@@ -254,7 +254,7 @@ class StubAuthProvider:
 
 ## PP1.7 — Create Auth Middleware & Campaign Scope Dependencies
 
-**Status:** `Planning`
+**Status:** `Completed` (commit: 8a5983e)
 
 **Goal:** FastAPI dependencies for authentication and campaign-scoped repository injection.
 

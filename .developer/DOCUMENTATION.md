@@ -50,3 +50,13 @@ tradeoffs only in source comments or chat history.
 
 `HISTORY.md` records completed milestones and meaningful changes. It is not a
 second changelog for every commit.
+
+## Application Layer documentation
+
+When adding application services, document:
+
+1. The use case the service addresses.
+2. The repositories/integrations it coordinates.
+3. The error conditions it raises.
+5. How it fits into the dependency chain (transport → application → repositories/integrations).
+6. Test strategy (unit with doubles, integration with real DB).

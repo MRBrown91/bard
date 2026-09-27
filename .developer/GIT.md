@@ -52,15 +52,52 @@ main ─────────────────────────
 | Future | `phase{X}{Y}-short-description` |
 
 ### Branch Lifecycle
-1. Create branch from `main`: `git checkout -b phase1a-campaigns main`
+
+#### Starting a New Phase (Required Commands)
+```bash
+# 1. Ensure main is up to date
+git checkout main
+git pull origin main
+
+# 2. Create feature branch from main (use exact branch name from table)
+git checkout -b prephase1-foundation main
+# or: git checkout -b phase1a-campaigns main
+# or: git checkout -b phase1b-entities main
+# etc.
+
+# 3. Verify branch
+git branch --show-current
+# Output: prephase1-foundation
+```
+
+#### During Development
 2. Make atomic commits (see Commit Standards)
 3. Push branch, open PR to `main`
 4. CI must pass (ruff, mypy, pytest)
 5. Self-review (solo) or peer review (team)
-6. Rebase onto latest `main`: `git rebase main`
-7. Merge with `--no-ff`: `git merge --no-ff phase1a-campaigns`
-8. Tag milestone: `git tag phase1a-complete`
-9. Delete branch: `git branch -d phase1a-campaigns`
+
+#### Completing a Phase
+6. Rebase onto latest `main`:
+   ```bash
+   git fetch origin
+   git rebase origin/main
+   ```
+7. Merge with `--no-ff` (from `main`):
+   ```bash
+   git checkout main
+   git merge --no-ff prephase1-foundation
+   ```
+8. Tag milestone:
+   ```bash
+   git tag prephase1-complete
+   git push origin prephase1-complete
+   ```
+9. Push main and delete branch:
+   ```bash
+   git push origin main
+   git branch -d prephase1-foundation
+   git push origin --delete prephase1-foundation  # optional cleanup
+   ```
 
 ---
 
