@@ -61,10 +61,41 @@ Database models implement persistence concerns.
 Transport code must not contain domain rules.
 Application services must not depend on transport types (FastAPI, WebSocket).
 
+SQL queries live in repositories. ORM relationships are declared on models and
+used by repositories, so the query shape stays in the persistence layer rather
+than leaking into application services.
+
 ## Naming
 
 Use singular domain model names (`Campaign`, `EntityFact`) and plural database
 relationship collections. Python modules use lowercase snake_case.
+
+## Entity composition
+
+`Entity` is the identity root. Everything else that belongs to an entity hangs
+off it through a one-way foreign key to `entities.id`, and is reached through
+an ORM relationship declared on `Entity` rather than a hand-rolled join:
+
+```text
+Entity
+├── actor / player / player_character       one-to-one, filtered on deleted_at IS NULL
+├── location / item / faction               one-to-one, filtered on deleted_at IS NULL
+├── aliases                                 one-to-many
+├── facts                                   one-to-many
+└── relationships_as_source / _as_target    one-to-many
+```
+
+The six specializations share the entity's UUID, so they are addressed by the
+same `{id}` as the entity and live at flat sub-resource paths
+(`/api/campaigns/{id}/actors/{id}`). They carry no `campaign_id`: a
+specialized repository resolves the parent `Entity` through the
+campaign-scoped `EntityRepository` and asserts the entity's type, so campaign
+isolation is defined once (ADR-021).
+
+Schema composition mirrors this. `EntityKeyMixin` carries only `entity_id`
+because the models already inherit `TimestampMixin`; specialized read models
+compose `EntityKeyMixin + TimestampMixin` and embed the base entity, so a
+single `created_at` is on the wire for client-side sorting.
 
 ## Application Layer Organization
 
@@ -73,6 +104,6 @@ Application services are use-case oriented, not model-oriented:
 * `app/application/users/` — User identity resolution
 * `app/application/campaigns/` — Campaign ownership and access
 * `app/application/documents/` — Document ingestion
-* `app/application/entities/` — Entity creation and matching
+* `app/application/entities/` — Entity creation, alias management, specialized entity CRUD, and matching
 * `app/application/facts/` — Fact extraction and invalidation
 * `app/application/realtime/` — Live transcript processing

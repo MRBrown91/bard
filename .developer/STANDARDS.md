@@ -81,3 +81,16 @@ Rules:
 5. No formal Domain layer without demonstrated need.
 6. Avoid "god services" — prefer small, cohesive modules/functions.
 7. Classes only when state/dependencies/lifecycle require them.
+8. Enforce immutable and enum-like fields in the schema and application layer, not only in the database. Reject an attempt to change an immutable field rather than ignoring it silently, so the client learns the change did not happen.
+
+## Enforcing type and ownership invariants
+
+When a resource is reachable through a parent that carries the authorization
+scope, resolve the parent first and assert the type before touching the child.
+For a specialized entity this means the campaign-scoped `EntityRepository` is
+consulted before the specialization, so a cross-campaign identifier is a 404
+and never reaches the child table.
+
+Never widen a shared schema mixin to avoid composing two. Keep each mixin to
+the fields that are genuinely common and compose the rest, so that inherited
+fields are deliberate rather than incidental.

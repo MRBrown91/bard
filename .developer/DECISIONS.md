@@ -28,6 +28,30 @@ visibility, and future state changes that require deterministic persistence.
 **Decision:** Use a durable Entity identity with small specialized tables for
 Actor, Player, PlayerCharacter, Location, Item, and Faction.
 
+**Structure:** Each specialized table keys on `entity_id` as both primary key
+and foreign key to `entities.id`, making it a strict one-to-one extension
+rather than table-per-class inheritance. Stable canonical identity fields stay
+on `entities` so the engine can always resolve and name a thing; everything
+else is separated because it changes as the story develops and belongs in
+campaign history instead of the stable core.
+
+**Consequences:**
+- Exactly one specialization table exists per `entity_type`, so the
+  specialization is mandatory rather than optional. An entity is created
+  first and its specialization second, which makes an entity without its
+  specialization row a normal transient state: the base read succeeds and the
+  type endpoint returns 404.
+- Specialized rows are addressed by the same UUID as their entity, so API
+  endpoints are flat sub-resources per type (`/actors/{id}`) rather than
+  nested under the entity.
+- Specialized read schemas expose `entity_id` and embed the base entity, so a
+  list endpoint is usable in one request. See ADR-021.
+- Schema base classes stay narrow: a shared `EntityKeyMixin` carries only
+  `entity_id`. The models already inherit `TimestampMixin` for
+  `created_at`/`updated_at`/`deleted_at`, and duplicating `created_at` on the
+  wire would put two near-identical timestamps that disagree by a few
+  milliseconds in front of client-side sorting.
+
 **Reason:** Stable canonical fields remain easy to edit while evolving knowledge
 lives in facts.
 
@@ -323,3 +347,79 @@ logic (entity matching, knowledge retrieval, visibility filtering) should
 be transport-independent and reusable from HTTP endpoints or background jobs.
 
 **Status:** Approved — implement as PrePhase1 step (PP1.7).
+## ADR-020: entity_type is an immutable six-value enum
+
+**Decision:** `EntityType` is a `StrEnum` with exactly six values: `actor`,
+`player`, `player_character`, `location`, `item`, `faction`. An NPC is an
+`actor`; there is no separate `npc` type. Once created, `entity_type` cannot
+be changed — a `PATCH` that sets it is rejected with 422 rather than silently
+ignored.
+
+**Enforcement:** Python enum plus Pydantic validation, per ADR-011. The
+database column stays `varchar(50)` with no CHECK constraint until Phase 2.
+
+**Consequences:**
+- Every valid `entity_type` maps to exactly one specialization table, so a
+  specialized repository asserts the type on every access instead of relying
+  on presence of a row. A location entity can never share an id with an actor
+  because `entity_id` is the specialization's primary key, so the check is
+  belt-and-braces — but it makes the rejection deliberate and prevents a stale
+  row surviving a future type change.
+- Converting an actor into a location means deleting and recreating the
+  entity. This is accepted because the alternative, a type change that leaves
+  a specialization row attached to the wrong table, is a silent data
+  corruption.
+
+**Reason:** The type drives which specialization applies, which validation
+runs, and which endpoint reads it. Letting it drift would let an entity hold a
+specialization its type does not describe.
+
+**Status:** Approved — implement as Phase 1B.2.
+
+## ADR-021: Specialized data inherits campaign scope from Entity
+
+**Decision:** The six specialized tables do not carry `campaign_id` and never
+will. `Entity` gains real ORM relationships for every child table, and a
+specialized read or write always resolves the parent `Entity` through the
+campaign-scoped `EntityRepository` first. Loads use `selectinload`; each
+one-to-one specialization relationship is declared `uselist=False` and filters
+`deleted_at IS NULL` in its `primaryjoin`.
+
+**Structure:**
+```
+ActorRepository.get(entity_id)
+    ↓
+EntityRepository(session, campaign_id)          # campaign scope applied here
+    ↓
+select(Entity).where(id, campaign_id, deleted_at IS NULL)
+               .options(selectinload(Entity.actor))
+    ↓
+entity is None          → 404    (wrong campaign, or gone)
+entity.entity_type wrong → 404   (deliberate, see ADR-020)
+entity.actor is None    → 404    (entity exists, specialization does not yet)
+```
+
+**Consequences:**
+- Campaign isolation is defined once, on the entity, instead of being
+  reimplemented across six tables that have no such column.
+- Soft-deleted specializations are invisible through the relationship, because
+  `TimestampMixin` puts `deleted_at` on those models and a plain relationship
+  would otherwise return a deleted row as though it were live. This matches the
+  retention rule already applied to entity and alias reads.
+- Soft-deleting an entity stamps its specialization in the same transaction.
+  Without it a deleted entity leaves a live-looking specialization row. It is
+  unreachable through the API because every read is entity-scoped, but it is
+  inconsistent state.
+- `EntityKeyMixin` carries only `entity_id`; it is not widened to include `id`
+  or timestamps, because the models already inherit `TimestampMixin` and a
+  second `created_at` would give client-side sorting two values that disagree.
+- `Entity.aliases` is added alongside the specializations. The explicit alias
+  join is retained regardless, because a relationship can load rows but cannot
+  filter a query, and alias search needs both.
+
+**Reason:** Duplicating campaign predicates across six child tables is how
+cross-campaign leakage happens, and each copy is a place to forget one. The
+foreign keys all run child to `entities.id`, so there is no cycle to design
+around and no reason to carry a second scope.
+
+**Status:** Approved — implement as Phase 1B.2.
