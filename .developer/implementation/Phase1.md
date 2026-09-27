@@ -102,7 +102,7 @@
 | POST | `/api/campaigns/{campaign_id}/entities` | Create entity (type, name, description) |
 | GET | `/api/campaigns/{campaign_id}/entities` | List entities (filter by type, search by name/description) |
 | GET | `/api/campaigns/{campaign_id}/entities/{entity_id}` | Get entity with aliases (specialized data lands in P1B.2) |
-| PATCH | `/api/campaigns/{campaign_id}/entities/{entity_id}` | Update base entity fields |
+| PATCH | `/api/campaigns/{campaign_id}/entities/{entity_id}` | Update base entity name and description. `entity_type` is immutable and rejected with a 422; see P1B.2 |
 | DELETE | `/api/campaigns/{campaign_id}/entities/{entity_id}` | Soft delete entity |
 
 **Alias Sub-resource:**
@@ -118,8 +118,8 @@
 **Authorization:** Campaign owner, enforced by the `CurrentCampaign` dependency before any use case runs. The campaign is taken from the repository scope, never from the request body.
 
 **Notes:**
-- Aliases are loaded with an explicit query; `Entity` deliberately has no alias ORM relationship.
 - Reads exclude soft-deleted rows so retained history stays invisible to the application.
+- Aliases are currently loaded with an explicit query. P1B.2 adds the `Entity.aliases` relationship for loading; the explicit alias join is retained regardless, because a relationship can load rows but cannot filter a query, and alias search needs both.
 - All timestamps are timezone-aware UTC: columns are `timestamptz`, `deleted_at` is written with `datetime.now(UTC)`, and every connection pins `SET TIME ZONE 'UTC'`.
 
 **Tests:** 57 tests across `tests/application/entities/`, `tests/repositories/test_entity_repo.py`, and `tests/api/test_entity_endpoints.py` covering CRUD, alias uniqueness, campaign scoping (asserted against compiled SQL), LIKE escaping, soft-delete visibility, UTC timestamps, and 401/404/409/422 mapping.
@@ -130,35 +130,86 @@
 
 ### P1B.2 — Specialized Entity APIs
 
-**Status:** `Planning`
+**Status:** `Planning` — design agreed, not started
 
-**Goal:** Manage stable canonical fields for each entity type.
+**Goal:** Manage the stable canonical fields that only apply to one entity type, reached through real ORM relationships on `Entity`.
 
-**Endpoints (per type: actors, players, player-characters, locations, items, factions):**
+#### Decisions
+
+**Ownership lives on the entity, never on the specialization.** The six specialized tables have no `campaign_id` column and must not grow one. Every specialized read and write resolves the parent `Entity` through the campaign-scoped `EntityRepository` first, so campaign isolation is inherited from one place instead of reimplemented six times.
+
+**`Entity` gains real ORM relationships.** The foreign keys all run one way, child to `entities.id`, so there is no cycle to design around:
+
+| Relationship | Cardinality | Target |
+|---|---|---|
+| `Entity.actor`, `.player`, `.player_character`, `.location`, `.item`, `.faction` | one-to-one | specialization table via `entity_id` |
+| `Entity.aliases` | one-to-many | `entity_aliases` |
+| `Entity.facts` | one-to-many | `entity_facts` (P1D.1) |
+| `Entity.relationships_as_source`, `.relationships_as_target` | one-to-many | `entity_relationship_facts` (P1D.2) |
+
+Loads use `selectinload` so a list of entities fetches its specializations in one additional statement rather than one per row. `uselist=False` is required on the six one-to-one relationships; without it SQLAlchemy infers a collection from the absence of a uniqueness constraint it can see.
+
+**Soft-deleted rows are invisible through the relationship.** Each specialization relationship filters `deleted_at IS NULL` in its `primaryjoin`. A plain relationship would return a soft-deleted actor as though it were live, because `TimestampMixin` puts `deleted_at` on the specialization models. This is the same "retain history, hide it from the application" rule already applied to entity and alias reads.
+
+**Presence is not sufficient; type is asserted too.** Because `entity_id` is the primary key of every specialization table, a location entity can never share an id with an actor, so a presence check alone would technically be enough. The specialized repository asserts `entity_type` explicitly anyway, so the rejection is a deliberate 404 rather than an accident of the schema, and a stale row cannot survive a future type change.
+
+**`entity_type` is an immutable six-value enum.** Per ADR-011 the enforcement is a Python enum plus Pydantic validation, not a database CHECK constraint. The values are `actor`, `player`, `player_character`, `location`, `item`, `faction`. An NPC is an `actor`; there is no separate `npc` type. `PATCH /entities/{id}` rejects any `entity_type` change with a 422 — converting an actor into a location means deleting and recreating.
+
+**Exactly one specialization table per type, so the specialization is mandatory.** Every valid `entity_type` has a table. An entity is created first and its specialization second, which means an entity that exists without its specialization row is a normal transient state rather than corruption. While it is in that state, `GET /entities/{id}` returns it normally and the type endpoint returns 404. Enforcing a completeness invariant is deferred.
+
+**Two calls, entity first.** `POST /entities` then `POST /actors`. The entity insert never depends on the specialization, which is the whole of the circularity rule. A combined payload is not provided.
+
+**`EntityKeyMixin` stays narrow.** It carries `entity_id` and nothing else. The specialized models already inherit `TimestampMixin`, which supplies `created_at`, `updated_at`, and `deleted_at`, so no mixin needs to invent them. Widening the mixin to include `id` or timestamps would duplicate fields that already exist and would put a second `created_at` on the wire: a specialization's `created_at` is the same instant as its entity's, and two near-identical values that disagree by a few milliseconds produce a confusing client-side sort. Sorting reads the entity's `created_at`, which the response already carries.
+
+**Specialized responses embed the base entity.** `/actors/{id}` returns the base entity fields and the actor fields together, so a list endpoint is usable in one request and there is a single `created_at` to sort on. This is a schema decision, not a query convenience, and it is why the entity is always loaded alongside.
+
+**Soft-deleting an entity cascades to its specialization.** Both rows are stamped in the same transaction. Without it, deleting an entity leaves a live-looking actor row; it is unreachable through the API because every read is entity-scoped, but it is inconsistent state.
+
+#### Endpoints
+
+Flat sub-resources per type, not nested under the entity. The specialization shares the entity's id, so `{id}` is the same UUID in both places.
+
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/campaigns/{campaign_id}/entities/{entity_id}/actor` | Create/update actor data |
-| GET | `/api/campaigns/{campaign_id}/entities/{entity_id}/actor` | Get actor data |
-| PATCH | `/api/campaigns/{campaign_id}/entities/{entity_id}/actor` | Update actor fields |
-| DELETE | `/api/campaigns/{campaign_id}/entities/{entity_id}/actor` | Remove actor specialization |
+| POST | `/api/campaigns/{campaign_id}/actors` | Create actor for an existing `actor` entity |
+| GET | `/api/campaigns/{campaign_id}/actors` | List actors (paginated, filter by name) |
+| GET | `/api/campaigns/{campaign_id}/actors/{id}` | Get actor with embedded base entity |
+| PATCH | `/api/campaigns/{campaign_id}/actors/{id}` | Update actor fields |
+| DELETE | `/api/campaigns/{campaign_id}/actors/{id}` | Soft delete actor specialization |
 
-**Player Endpoint Additional:**
-- POST `/api/campaigns/{campaign_id}/players` — Create player (links User + Entity)
-- GET `/api/campaigns/{campaign_id}/players` — List players
+The same five endpoints exist for `players`, `player-characters`, `locations`, `items`, and `factions`.
 
-**PlayerCharacter Endpoint:**
-- POST `/api/campaigns/{campaign_id}/player-characters` — Link character entity to player
+`POST /players` additionally requires `user_id`; `POST /player-characters` additionally requires `player_id`.
 
-**Service:** `SpecializedEntityService` (or per-type services)
-**Schemas:** Per-type create/read/update models
+**Application:** Use-case functions in `app/application/entities/` alongside the core use cases, one module per type. No service layer.
+**Repository:** `EntityRepository` plus `ActorRepository`, `PlayerRepository`, `PlayerCharacterRepository`, `LocationRepository`, `ItemRepository`, `FactionRepository`.
+**Schemas:** `EntityType` (new `StrEnum` in `app/schemas/entity.py`, the only place entity types are declared) and `EntityKeyMixin` (in `app/schemas/common.py`), per-type create/update models, and per-type read models composed as `EntityKeyMixin + TimestampMixin` with the base entity embedded.
 
-**Validation:**
-- Actor: entity_type must be "actor"
-- Player: entity_type must be "player"; user_id must exist
-- PlayerCharacter: entity_type must be "player_character"; player must exist in same campaign
-- Location/Item/Faction: corresponding entity_type
+#### Schema and model corrections required first
 
-**Tests:** Type enforcement; cross-campaign prevention; FK integrity.
+The existing specialized code does not work and must be repaired before any endpoint is written:
+
+- `app/schemas/specialized.py` read models inherit `IDMixin` and require `id`. These tables have no `id` column, only `entity_id`, so every read would fail validation. They are rebuilt on `EntityKeyMixin`.
+- `app/schemas/specialized.py` has no `PlayerCharacterUpdate`.
+- `BaseRepository.get`, `update`, and `exists` all filter on `self.model.id`, which does not exist on these models. The specialized repositories cannot inherit those methods as written.
+
+Two committed P1B.1 behaviours become wrong once the enum exists. They are corrected as part of P1B.2's work, because the enum is introduced there:
+
+- `EntityCreate.entity_type` accepts any string. It is constrained to the `EntityType` enum.
+- `EntityUpdate.entity_type` is settable today. It is rejected, because the type is immutable. Sending it is a 422 rather than being silently ignored, so a client that expects the change to take effect is told plainly that it does not.
+
+#### Validation
+
+- Every write resolves the parent entity through the campaign-scoped `EntityRepository`, so a cross-campaign id is a 404 before any type check runs.
+- The entity's `entity_type` must equal the endpoint's type, otherwise 422.
+- `POST` against an entity that already has a live specialization is a 409.
+- `Player.user_id` must reference an existing user.
+- `PlayerCharacter.player_id` must reference a player **in the same campaign**. The foreign key alone will not catch a cross-campaign link, so this is validated explicitly.
+- Reads exclude soft-deleted specializations and soft-deleted entities.
+
+#### Tests
+
+Type enforcement on every type; cross-campaign 404 on read, write, and delete; `PlayerCharacter` cross-campaign `player_id` rejection; duplicate specialization 409; soft-deleted specialization invisible through both the relationship and the endpoint; embedded base entity present and correct; `entity_type` immutability rejected with 422; campaign scoping asserted against compiled SQL.
 
 ---
 
