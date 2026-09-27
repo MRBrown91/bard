@@ -5,7 +5,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.common import IDMixin, TimestampMixin, SoftDeleteMixin, CampaignScopedMixin
+from app.schemas.common import (
+    IDMixin,
+    SoftDeleteMixin,
+    TimestampMixin,
+    CampaignScopedMixin,
+)
 
 
 class EntityBase(BaseModel):
@@ -19,7 +24,7 @@ class EntityBase(BaseModel):
 class EntityCreate(EntityBase):
     """Create entity request."""
 
-    pass
+    aliases: list["EntityAliasCreate"] = Field(default_factory=list)
 
 
 class EntityUpdate(BaseModel):
@@ -76,4 +81,4 @@ class EntityAliasRead(EntityAliasBase, IDMixin, TimestampMixin, SoftDeleteMixin)
 class EntityWithAliasesRead(EntityRead):
     """Entity with aliases loaded."""
 
-    aliases: list[EntityAliasRead] = []
+    aliases: list[EntityAliasRead] = Field(default_factory=list)

@@ -31,7 +31,7 @@ class CampaignUpdate(BaseModel):
     is_active: bool | None = None
 
 
-class CampaignRead(CampaignBase, IDMixin, TimestampMixin, SoftDeleteMixin, CampaignScopedMixin):
+class CampaignRead(CampaignBase, IDMixin, TimestampMixin, SoftDeleteMixin):
     """Campaign response."""
 
     user_id: UUID
@@ -100,8 +100,10 @@ class SessionUpdate(BaseModel):
     ended_at: datetime | None = None
 
 
-class SessionRead(SessionBase, IDMixin, TimestampMixin, SoftDeleteMixin, CampaignScopedMixin):
+class SessionRead(SessionBase, IDMixin, TimestampMixin, SoftDeleteMixin):
     """Session response."""
+
+    campaign_id: UUID
 
     model_config = ConfigDict(from_attributes=True)
 

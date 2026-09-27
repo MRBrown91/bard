@@ -17,7 +17,7 @@
 
 ### P1A.1 — Campaign CRUD API
 
-**Status:** `Planning`
+**Status:** `Completed` (commit: 929d585)
 
 **Goal:** Full campaign lifecycle management.
 
@@ -30,11 +30,13 @@
 | PATCH | `/api/campaigns/{campaign_id}` | Update campaign (name, description, is_active) |
 | DELETE | `/api/campaigns/{campaign_id}` | Soft delete campaign |
 
-**Service:** `CampaignService` in `app/services/campaign_service.py`
+**Application:** No use-case layer. Routes call `CampaignRepository` directly; campaign authorization uses `get_current_campaign` in `app/application/campaigns/get_current_campaign.py` via the `CurrentCampaign` dependency.
 **Repository:** `CampaignRepository` (from PrePhase1)
 **Schemas:** `CampaignCreate`, `CampaignRead`, `CampaignUpdate`, `CampaignList`
 
 **Authorization:** Owner-only for PATCH/DELETE/GET-by-id. List returns only owned campaigns.
+
+**Known deviation:** `app/api/http/routes/campaigns.py` places persistence calls in route handlers, which AGENTS.md prohibits. P1B.1 introduced a use-case layer for entities; campaigns and sessions have not been migrated yet.
 
 **Tests:**
 - Unit: service methods with fake repo
@@ -44,7 +46,7 @@
 
 ### P1A.2 — Campaign Member API (Stub for Future Sharing)
 
-**Status:** `Planning`
+**Status:** `Completed` (commit: 929d585)
 
 **Goal:** Scaffold membership endpoints (no permission enforcement yet).
 
@@ -63,20 +65,20 @@
 
 ### P1A.3 — Session CRUD API
 
-**Status:** `Planning`
+**Status:** `Completed` (commit: 929d585)
 
 **Goal:** Session management within a campaign.
 
 **Endpoints:**
 | Method | Path | Description |
-|--------|------|-------------|
+|--------|------|-------------------------|
 | POST | `/api/campaigns/{campaign_id}/sessions` | Create session |
 | GET | `/api/campaigns/{campaign_id}/sessions` | List sessions (paginated, filter by active/ended) |
 | GET | `/api/campaigns/{campaign_id}/sessions/{session_id}` | Get session details |
 | PATCH | `/api/campaigns/{campaign_id}/sessions/{session_id}` | Update session (name, session_number, started_at, ended_at) |
 | DELETE | `/api/campaigns/{campaign_id}/sessions/{session_id}` | Soft delete session |
 
-**Service:** `SessionService`
+**Application:** No use-case layer. Routes call `SessionRepository` directly (same deviation as P1A.1).
 **Repository:** `SessionRepository`
 **Schemas:** `SessionCreate`, `SessionRead`, `SessionUpdate`, `SessionList`
 
@@ -90,7 +92,7 @@
 
 ### P1B.1 — Entity Core CRUD API
 
-**Status:** `Planning`
+**Status:** `Completed`
 
 **Goal:** Manage base entities and aliases.
 
@@ -98,8 +100,8 @@
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/campaigns/{campaign_id}/entities` | Create entity (type, name, description) |
-| GET | `/api/campaigns/{campaign_id}/entities` | List entities (filter by type, search by name) |
-| GET | `/api/campaigns/{campaign_id}/entities/{entity_id}` | Get entity with specialized data + aliases |
+| GET | `/api/campaigns/{campaign_id}/entities` | List entities (filter by type, search by name/description) |
+| GET | `/api/campaigns/{campaign_id}/entities/{entity_id}` | Get entity with aliases (specialized data lands in P1B.2) |
 | PATCH | `/api/campaigns/{campaign_id}/entities/{entity_id}` | Update base entity fields |
 | DELETE | `/api/campaigns/{campaign_id}/entities/{entity_id}` | Soft delete entity |
 
@@ -107,15 +109,22 @@
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/campaigns/{campaign_id}/entities/{entity_id}/aliases` | Add alias |
-| DELETE | `/api/campaigns/{campaign_id}/entities/{entity_id}/aliases/{alias_id}` | Remove alias |
+| DELETE | `/api/campaigns/{campaign_id}/entities/{entity_id}/aliases/{alias_id}` | Soft delete alias |
 
-**Service:** `EntityService`
-**Repository:** `EntityRepository`
-**Schemas:** `EntityCreate`, `EntityRead`, `EntityUpdate`, `EntityList`, `AliasCreate`, `AliasRead`
+**Application:** Use-case functions in `app/application/entities/` (`create_entity`, `add_alias`, `get_entity`, `get_entity_with_aliases`, `list_entities`, `update_entity`, `soft_delete_entity`, `remove_alias`).
+**Repository:** `EntityRepository`, `EntityAliasRepository`
+**Schemas:** `EntityCreate`, `EntityRead`, `EntityUpdate`, `EntityList`, `EntityWithAliasesRead`, `EntityAliasCreate`, `EntityAliasRead`
 
-**Authorization:** Campaign owner.
+**Authorization:** Campaign owner, enforced by the `CurrentCampaign` dependency before any use case runs. The campaign is taken from the repository scope, never from the request body.
 
-**Tests:** Entity + alias CRUD; alias uniqueness per entity; type validation.
+**Notes:**
+- Aliases are loaded with an explicit query; `Entity` deliberately has no alias ORM relationship.
+- Reads exclude soft-deleted rows so retained history stays invisible to the application.
+- All timestamps are timezone-aware UTC: columns are `timestamptz`, `deleted_at` is written with `datetime.now(UTC)`, and every connection pins `SET TIME ZONE 'UTC'`.
+
+**Tests:** 57 tests across `tests/application/entities/`, `tests/repositories/test_entity_repo.py`, and `tests/api/test_entity_endpoints.py` covering CRUD, alias uniqueness, campaign scoping (asserted against compiled SQL), LIKE escaping, soft-delete visibility, UTC timestamps, and 401/404/409/422 mapping.
+
+**Verified manually against the development database:** create, read, filter, wildcard escaping, patch, clearing description, alias add/remove, soft delete, cross-campaign 404, and unauthenticated 401. This surfaced two defects that mocked tests could not: `BaseRepository.create` injected `campaign_id` into `EntityAlias` (which has no such column), and `BaseRepository.update` left the server-managed `updated_at` expired, raising `MissingGreenlet` on serialisation. Both are fixed and covered by repository tests.
 
 ---
 
@@ -317,7 +326,7 @@
 - Relationship fact status changed to "invalidated"/"superseded" OR deleted → remove materialized
 - Relationship fact deleted → remove materialized
 
-**Implementation:** Domain event handlers in `app/services/relationship_sync.py` called from `RelationshipFactService` methods.
+**Implementation:** Domain event handlers in `app/application/relationships/relationship_sync.py` called from `RelationshipFactService` methods.
 
 **Tests:** Sync correctness for all status transitions; idempotency; race condition handling (DB constraints).
 
@@ -340,8 +349,8 @@
 6. Return `EntityCandidate` list sorted by confidence
 
 **Files:**
-- `app/services/entity_matching.py` — Replace stub with implementation
-- `app/services/matching_pipeline.py` — Pipeline steps as composable functions
+- `app/application/entities/entity_matching.py` — Replace stub with implementation
+- `app/application/entities/matching_pipeline.py` — Pipeline steps as composable functions
 
 **Confidence Scoring:**
 - Exact name: 1.0
@@ -386,13 +395,13 @@
 
 **Status:** `Planning`
 
-**Goal:** Upgrade WebSocket to require authentication and campaign scope.
+**Goal:** Upgrade WebSocket to require campaign scope.
 
-**Changes to `app/realtime/stream.py`:**
-- Extract token from query string: `/ws/stream?token=<jwt>&campaign_id=<uuid>`
-- Validate via `AuthProvider`
-- Verify campaign access
-- Inject `campaign_id` and `user` into connection state
+**Changes to `app/api/websocket/routes/stream.py`:**
+- [x] Extract token from query string: `/ws/stream?token=<jwt>`
+- [x] Validate via `AuthProvider` (rejects with close code 4001)
+- [ ] Add `campaign_id` to the query string and verify campaign access
+- [ ] Inject `campaign_id` and `user` into connection state
 
 **Message Protocol (v1):**
 ```json
@@ -422,8 +431,8 @@
 5. Send `transcript_ack` with matches + context cards
 
 **Files:**
-- `app/realtime/stream.py` — Implement pipeline
-- `app/services/realtime_service.py` — Business logic for context assembly
+- `app/api/websocket/routes/stream.py` — Implement pipeline
+- `app/application/realtime/realtime_service.py` — Business logic for context assembly
 
 **Context Card Content:**
 - Entity base info (name, type, description)

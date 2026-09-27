@@ -2,19 +2,17 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
-from sqlalchemy import Select, delete, func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import DeclarativeBase
 
-T = TypeVar("T", bound="DeclarativeBase")
-
-
-class BaseRepository(ABC, Generic[T]):
+class BaseRepository[T: DeclarativeBase](ABC):
     """Base repository with automatic campaign isolation."""
 
     def __init__(self, session: AsyncSession, campaign_id: UUID | None = None):
@@ -60,8 +58,13 @@ class BaseRepository(ABC, Generic[T]):
         return cast(int, result.scalar_one())
 
     async def create(self, **kwargs: Any) -> T:
-        """Create new record with campaign_id."""
-        if self.campaign_id is not None:
+        """Create new record, defaulting campaign_id from the scope.
+
+        Models that have no ``campaign_id`` column (for example the entity
+        alias table, which inherits isolation through its parent entity) are
+        left untouched.
+        """
+        if self.campaign_id is not None and hasattr(self.model, "campaign_id"):
             kwargs.setdefault("campaign_id", self.campaign_id)
         obj = self.model(**kwargs)
         self.session.add(obj)
@@ -69,22 +72,27 @@ class BaseRepository(ABC, Generic[T]):
         return obj
 
     async def update(self, id: UUID, **kwargs: Any) -> T | None:
-        """Update by ID with campaign scope."""
+        """Update by ID with campaign scope.
+
+        The row is refreshed after the flush because ``updated_at`` is a
+        server-side ``onupdate`` default. Without the refresh the attribute is
+        expired, and reading it would trigger implicit IO from async context.
+        """
         obj = await self.get(id)
         if obj is None:
             return None
         for key, value in kwargs.items():
             setattr(obj, key, value)
         await self.session.flush()
+        await self.session.refresh(obj)
         return obj
 
     async def soft_delete(self, id: UUID) -> bool:
         """Soft delete by ID with campaign scope."""
-        from datetime import datetime
         obj = await self.get(id)
         if obj is None:
             return False
-        obj.deleted_at = datetime.now(obj.deleted_at.tzinfo) if obj.deleted_at else datetime.utcnow()  # type: ignore[attr-defined]
+        obj.deleted_at = datetime.now(UTC)  # type: ignore[attr-defined]
         await self.session.flush()
         return True
 
