@@ -19,13 +19,19 @@ from app.integrations.auth import (
 )
 from app.models import Campaign, User
 from app.repositories import (
+    ActorRepository,
     CampaignRepository,
     DocumentRepository,
     DocumentStatementRepository,
     EntityAliasRepository,
     EntityRepository,
     EventRepository,
+    FactionRepository,
     FactRepository,
+    ItemRepository,
+    LocationRepository,
+    PlayerCharacterRepository,
+    PlayerRepository,
     RelationshipFactRepository,
     RelationshipRepository,
     SessionRepository,
@@ -148,6 +154,48 @@ async def get_event_repo(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> EventRepository:
     return EventRepository(session, campaign.id)
+
+
+async def get_actor_repo(
+    campaign: Annotated[Campaign, Depends(get_current_campaign)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ActorRepository:
+    return ActorRepository(session, campaign.id)
+
+
+async def get_player_repo(
+    campaign: Annotated[Campaign, Depends(get_current_campaign)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> PlayerRepository:
+    return PlayerRepository(session, campaign.id)
+
+
+async def get_player_character_repo(
+    campaign: Annotated[Campaign, Depends(get_current_campaign)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> PlayerCharacterRepository:
+    return PlayerCharacterRepository(session, campaign.id)
+
+
+async def get_location_repo(
+    campaign: Annotated[Campaign, Depends(get_current_campaign)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> LocationRepository:
+    return LocationRepository(session, campaign.id)
+
+
+async def get_item_repo(
+    campaign: Annotated[Campaign, Depends(get_current_campaign)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ItemRepository:
+    return ItemRepository(session, campaign.id)
+
+
+async def get_faction_repo(
+    campaign: Annotated[Campaign, Depends(get_current_campaign)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> FactionRepository:
+    return FactionRepository(session, campaign.id)
 
 
 # --- Convenience: CurrentUser + CurrentCampaign ---

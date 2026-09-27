@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
     get_current_campaign,
@@ -45,7 +46,7 @@ def make_entity_row(campaign_id: UUID, name: str = "Larkfellow") -> MagicMock:
     row = MagicMock()
     row.id = uuid4()
     row.campaign_id = campaign_id
-    row.entity_type = "npc"
+    row.entity_type = "actor"
     row.name = name
     row.description = None
     row.created_at = NOW
@@ -99,7 +100,13 @@ def authorized(campaign: Campaign) -> Iterator[Authorized]:
 
     entity_repo.create.side_effect = create_entity_row
     entity_repo.update.side_effect = update_entity_row
-    entity_repo.soft_delete.return_value = True
+    async def get_entity_row(id: UUID, *names: str) -> MagicMock:
+        row = make_entity_row(campaign.id)
+        row.id = id
+        return row
+
+    entity_repo.get_with.side_effect = get_entity_row
+    entity_repo.session = AsyncMock(spec=AsyncSession)
     entity_repo.count_filtered.return_value = 0
     entity_repo.list_filtered.return_value = []
     alias_repo.create.side_effect = lambda **kw: make_alias_row(
@@ -128,7 +135,7 @@ class TestEntityEndpoints:
         with authorized(campaign) as ctx:
             response = ctx.client.post(
                 f"/api/campaigns/{campaign.id}/entities",
-                json={"entity_type": "npc", "name": "Larkfellow"},
+                json={"entity_type": "actor", "name": "Larkfellow"},
             )
 
         assert response.status_code == 201
@@ -142,7 +149,7 @@ class TestEntityEndpoints:
             response = ctx.client.post(
                 f"/api/campaigns/{campaign.id}/entities",
                 json={
-                    "entity_type": "npc",
+                    "entity_type": "actor",
                     "name": "Larkfellow",
                     "aliases": [{"alias": "Host"}],
                 },
@@ -162,10 +169,12 @@ class TestEntityEndpoints:
         with authorized(campaign) as ctx:
             row = make_entity_row(campaign.id)
             row.id = entity_id
-            ctx.entity_repo.get.return_value = row
-            ctx.alias_repo.get_by_entity.return_value = [
-                make_alias_row(entity_id, "Host")
-            ]
+            row.aliases = [make_alias_row(entity_id, "Host")]
+
+            async def get_with(id: UUID, *names: str) -> MagicMock:
+                return row
+
+            ctx.entity_repo.get_with.side_effect = get_with
 
             response = ctx.client.get(
                 f"/api/campaigns/{campaign.id}/entities/{entity_id}"
@@ -267,7 +276,8 @@ class TestEntityEndpoints:
         """An unknown entity is translated to HTTP 404."""
         campaign = make_campaign()
         with authorized(campaign) as ctx:
-            ctx.entity_repo.get.return_value = None
+            ctx.entity_repo.get_with.side_effect = None
+            ctx.entity_repo.get_with.return_value = None
 
             response = ctx.client.get(
                 f"/api/campaigns/{campaign.id}/entities/{uuid4()}"

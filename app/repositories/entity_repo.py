@@ -1,21 +1,21 @@
 """Entity repository with alias support."""
 
+from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import Select, func, or_, select
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import aliased, selectinload
 
 from app.models import Entity, EntityAlias
-from app.models.entity.entity_types import (
-    Actor,
-    Faction,
-    Item,
-    Location,
-    Player,
-    PlayerCharacter,
-)
 from app.repositories.base import BaseRepository
+from app.schemas.entity import EntityType
+
+# The six one-to-one specializations declared on Entity. Derived from the enum
+# so the set cannot drift from the types that actually have a table.
+SPECIALIZATION_RELATIONSHIPS: tuple[str, ...] = tuple(
+    entity_type.value for entity_type in EntityType
+)
 
 LIKE_ESCAPE = "\\"
 
@@ -49,10 +49,15 @@ class EntityRepository(BaseRepository[Entity]):
         result = await self.session.execute(stmt)
         return cast(Entity | None, result.scalar_one_or_none())
 
-    def _filtered(
+    def filtered_stmt(
         self, entity_type: str | None, name_contains: str | None
     ) -> Select[Any]:
-        """Build the campaign-scoped, filtered entity select."""
+        """Build the campaign-scoped, filtered entity select.
+
+        Public so repositories that extend entity queries — the specialized
+        repositories — can add their own predicates without duplicating the
+        scope and escaping rules.
+        """
         stmt = self._campaign_scope(self._active_scope(select(Entity)))
         if entity_type is not None:
             stmt = stmt.where(Entity.entity_type == entity_type)
@@ -65,6 +70,12 @@ class EntityRepository(BaseRepository[Entity]):
                 )
             )
         return stmt
+
+    def _filtered(
+        self, entity_type: str | None, name_contains: str | None
+    ) -> Select[Any]:
+        """Backwards-compatible alias for :meth:`filtered_stmt`."""
+        return self.filtered_stmt(entity_type, name_contains)
 
     async def list_filtered(
         self,
@@ -113,6 +124,80 @@ class EntityRepository(BaseRepository[Entity]):
         )
         return cast(Entity | None, result.scalar_one_or_none())
 
+    async def get_with(
+        self, id: UUID, *relationship_names: str
+    ) -> Entity | None:
+        """Get a non-deleted entity with the named relationships loaded.
+
+        The entity must be fetched before its specialization anyway, because
+        campaign scope and type both live on the entity, so loading the
+        relationship here costs one extra statement rather than a second round
+        trip. See ADR-021.
+        """
+        stmt = self._active_scope(select(Entity).where(Entity.id == id))
+        stmt = self._campaign_scope(stmt).options(
+            *[selectinload(getattr(Entity, name)) for name in relationship_names]
+        )
+        result = await self.session.execute(stmt)
+        return cast(Entity | None, result.scalar_one_or_none())
+
+    async def soft_delete_with_specializations(self, id: UUID) -> bool:
+        """Soft delete an entity together with its specialization.
+
+        Both rows are stamped in one transaction. Leaving a live specialization
+        behind is unreachable through the API, because every specialized read
+        resolves the entity first, but it is still inconsistent state.
+        """
+        entity = await self.get_with(id, *SPECIALIZATION_RELATIONSHIPS)
+        if entity is None:
+            return False
+        now = datetime.now(UTC)
+        entity.deleted_at = now
+        for relationship_name in SPECIALIZATION_RELATIONSHIPS:
+            specialized = cast(Any, getattr(entity, relationship_name))
+            if specialized is not None:
+                specialized.deleted_at = now
+        await self.session.flush()
+        return True
+
+    async def list_filtered_with(
+        self,
+        *,
+        relationship_names: tuple[str, ...] = (),
+        entity_type: str | None = None,
+        name_contains: str | None = None,
+        base_stmt: Select[Any] | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> list[Entity]:
+        """List entities with the named relationships eagerly loaded.
+
+        ``selectinload`` collects the primary keys of the whole page and issues
+        a single ``IN`` query, so a page of entities costs one extra statement
+        rather than one per row.
+
+        ``base_stmt`` lets a caller add its own predicates, such as requiring a
+        child row to exist, and still page over the result. Paging is applied
+        after those predicates so a page is never short.
+        """
+        # An explicit None check: SQLAlchemy clauses raise on __bool__, so
+        # `base_stmt or ...` would raise TypeError for every real statement.
+        if base_stmt is not None:
+            stmt = base_stmt
+        else:
+            stmt = self._filtered(entity_type, name_contains)
+        stmt = stmt.order_by(Entity.created_at.desc())
+        if relationship_names:
+            stmt = stmt.options(
+                *[
+                    selectinload(getattr(Entity, name))
+                    for name in relationship_names
+                ]
+            )
+        stmt = stmt.offset(offset).limit(limit)
+        result = await self.session.execute(stmt)
+        return cast(list[Entity], list(result.scalars().all()))
+
 
 class EntityAliasRepository(BaseRepository[EntityAlias]):
     """Repository for EntityAlias operations.
@@ -154,63 +239,3 @@ class EntityAliasRepository(BaseRepository[EntityAlias]):
         )
         result = await self.session.execute(stmt)
         return cast(EntityAlias | None, result.scalar_one_or_none())
-
-
-class ActorRepository(BaseRepository[Actor]):
-    """Repository for Actor operations."""
-
-    @property
-    def model(self) -> type[Actor]:
-        return Actor
-
-
-class PlayerRepository(BaseRepository[Player]):
-    """Repository for Player operations."""
-
-    @property
-    def model(self) -> type[Player]:
-        return Player
-
-    async def get_by_user(self, user_id: UUID) -> list[Player]:
-        """Get players linked to a user."""
-        stmt = select(Player).where(Player.user_id == user_id)
-        result = await self.session.execute(stmt)
-        return cast(list[Player], result.scalars().all())
-
-
-class PlayerCharacterRepository(BaseRepository[PlayerCharacter]):
-    """Repository for PlayerCharacter operations."""
-
-    @property
-    def model(self) -> type[PlayerCharacter]:
-        return PlayerCharacter
-
-    async def get_by_player(self, player_id: UUID) -> list[PlayerCharacter]:
-        """Get characters for a player."""
-        stmt = select(PlayerCharacter).where(PlayerCharacter.player_id == player_id)
-        result = await self.session.execute(stmt)
-        return cast(list[PlayerCharacter], result.scalars().all())
-
-
-class LocationRepository(BaseRepository[Location]):
-    """Repository for Location operations."""
-
-    @property
-    def model(self) -> type[Location]:
-        return Location
-
-
-class ItemRepository(BaseRepository[Item]):
-    """Repository for Item operations."""
-
-    @property
-    def model(self) -> type[Item]:
-        return Item
-
-
-class FactionRepository(BaseRepository[Faction]):
-    """Repository for Faction operations."""
-
-    @property
-    def model(self) -> type[Faction]:
-        return Faction

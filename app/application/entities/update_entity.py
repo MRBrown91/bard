@@ -46,8 +46,13 @@ async def soft_delete_entity(
     entity_id: UUID,
     entity_repo: EntityRepository,
 ) -> None:
-    """Soft delete an entity, preserving it for retcons."""
-    if not await entity_repo.soft_delete(entity_id):
+    """Soft delete an entity, preserving it for retcons.
+
+    The repository stamps the specialization in the same transaction. Without
+    that a deleted entity would leave a specialization row that still looks
+    live.
+    """
+    if not await entity_repo.soft_delete_with_specializations(entity_id):
         raise NotFoundError("Entity not found", {"entity_id": str(entity_id)})
 
 

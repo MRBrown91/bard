@@ -92,10 +92,11 @@ specialized repository resolves the parent `Entity` through the
 campaign-scoped `EntityRepository` and asserts the entity's type, so campaign
 isolation is defined once (ADR-021).
 
-Schema composition mirrors this. `EntityKeyMixin` carries only `entity_id`
-because the models already inherit `TimestampMixin`; specialized read models
-compose `EntityKeyMixin + TimestampMixin` and embed the base entity, so a
-single `created_at` is on the wire for client-side sorting.
+Schema composition mirrors this. `EntityKeyMixin` carries only `entity_id`,
+and a specialized read model composes it with the base entity embedded and no
+timestamps of its own. The entity carries the canonical `created_at`, and a
+second value from the specialization row would differ by a few milliseconds,
+leaving a client to sort on the wrong one.
 
 ## Application Layer Organization
 

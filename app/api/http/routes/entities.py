@@ -83,10 +83,9 @@ async def get_entity_endpoint(
     entity_id: UUID,
     campaign: CurrentCampaign,
     entity_repo: Annotated[EntityRepository, Depends(get_entity_repo)],
-    alias_repo: Annotated[EntityAliasRepository, Depends(get_entity_alias_repo)],
 ) -> EntityWithAliasesRead:
     """Get entity with its aliases."""
-    return await get_entity_with_aliases(entity_id, entity_repo, alias_repo)
+    return await get_entity_with_aliases(entity_id, entity_repo)
 
 
 @router.patch(

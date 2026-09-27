@@ -1,12 +1,10 @@
 """Shared schema components."""
 
 from datetime import datetime
-from typing import Any, Generic, TypeVar
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
-
-T = TypeVar("T")
+from pydantic import BaseModel, Field
 
 
 class PaginationParams(BaseModel):
@@ -16,7 +14,7 @@ class PaginationParams(BaseModel):
     page_size: int = Field(default=20, ge=1, le=100)
 
 
-class PaginatedResponse(BaseModel, Generic[T]):
+class PaginatedResponse[T](BaseModel):
     """Paginated response wrapper."""
 
     items: list[T]
@@ -51,6 +49,18 @@ class IDMixin(BaseModel):
     id: UUID
 
 
+class EntityKeyMixin(BaseModel):
+    """Reference to the entity a specialized row belongs to.
+
+    Deliberately narrow. The specialized models already inherit
+    ``TimestampMixin``, so a mixin carrying ``created_at`` as well would put a
+    second, near-identical timestamp on the wire for client-side sorting to
+    disagree over. See ADR-004.
+    """
+
+    entity_id: UUID
+
+
 class ErrorResponse(BaseModel):
     """Standard error response."""
 
@@ -59,7 +69,7 @@ class ErrorResponse(BaseModel):
     extra: dict[str, Any] | None = None
 
 
-class SuccessResponse(BaseModel, Generic[T]):
+class SuccessResponse[T](BaseModel):
     """Standard success response."""
 
     data: T

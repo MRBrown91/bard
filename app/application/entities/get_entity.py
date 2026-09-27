@@ -3,7 +3,7 @@
 from uuid import UUID
 
 from app.application.exceptions import NotFoundError
-from app.repositories import EntityAliasRepository, EntityRepository
+from app.repositories import EntityRepository
 from app.schemas.entity import EntityAliasRead, EntityRead, EntityWithAliasesRead
 
 
@@ -21,21 +21,22 @@ async def get_entity(
 async def get_entity_with_aliases(
     entity_id: UUID,
     entity_repo: EntityRepository,
-    alias_repo: EntityAliasRepository,
 ) -> EntityWithAliasesRead:
     """Get entity with its active aliases.
 
-    Aliases are loaded with an explicit query rather than ORM relationship
-    loading, because Entity deliberately has no alias relationship.
+    Aliases come from the ``Entity.aliases`` relationship, which filters
+    soft-deleted rows in its ``primaryjoin`` and orders by alias so the result
+    is stable. The response is built explicitly rather than validated from the
+    ORM object, so a relationship left unloaded is an error here rather than a
+    silent lazy load.
     """
-    entity = await entity_repo.get(entity_id)
+    entity = await entity_repo.get_with(entity_id, "aliases")
     if not entity:
         raise NotFoundError("Entity not found", {"entity_id": str(entity_id)})
 
-    aliases = await alias_repo.get_by_entity(entity_id)
-    read = EntityWithAliasesRead.model_validate(entity)
-    return read.model_copy(
-        update={"aliases": [EntityAliasRead.model_validate(alias) for alias in aliases]}
+    return EntityWithAliasesRead(
+        **EntityRead.model_validate(entity).model_dump(),
+        aliases=[EntityAliasRead.model_validate(a) for a in entity.aliases],
     )
 
 

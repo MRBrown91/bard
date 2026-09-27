@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.entities.create_entity import add_alias, create_entity
 from app.application.entities.get_entity import (
@@ -39,7 +40,7 @@ def make_entity(campaign_id: UUID | None = None, **overrides: object) -> MagicMo
     entity = MagicMock()
     entity.id = overrides.pop("id", uuid4())
     entity.campaign_id = campaign_id or uuid4()
-    entity.entity_type = overrides.pop("entity_type", "npc")
+    entity.entity_type = overrides.pop("entity_type", "actor")
     entity.name = overrides.pop("name", "Larkfellow")
     entity.description = overrides.pop("description", "A wary innkeeper")
     entity.created_at = NOW
@@ -76,7 +77,7 @@ def entity_repo_stub() -> AsyncMock:
         return make_entity(campaign_id=repo.campaign_id, id=id, **kwargs)
 
     repo.update.side_effect = update
-    repo.soft_delete.return_value = True
+    repo.session = AsyncMock(spec=AsyncSession)
     return repo
 
 
@@ -90,7 +91,7 @@ def alias_repo_stub() -> AsyncMock:
         return make_alias(entity_id=entity_id, alias=str(kwargs["alias"]))
 
     repo.create.side_effect = create
-    repo.soft_delete.return_value = True
+    repo.session = AsyncMock(spec=AsyncSession)
     return repo
 
 
@@ -104,7 +105,7 @@ class TestCreateEntity:
         alias_repo = alias_repo_stub()
 
         result = await create_entity(
-            EntityCreate(entity_type="npc", name="Larkfellow", description=None),
+            EntityCreate(entity_type="actor", name="Larkfellow", description=None),
             repo,
             alias_repo,
         )
@@ -112,7 +113,7 @@ class TestCreateEntity:
         assert result.name == "Larkfellow"
         assert result.campaign_id == repo.campaign_id
         repo.create.assert_awaited_once_with(
-            entity_type="npc", name="Larkfellow", description=None
+            entity_type="actor", name="Larkfellow", description=None
         )
         alias_repo.create.assert_not_awaited()
 
@@ -124,7 +125,7 @@ class TestCreateEntity:
 
         await create_entity(
             EntityCreate(
-                entity_type="npc",
+                entity_type="actor",
                 name="Larkfellow",
                 aliases=[
                     EntityAliasCreate(alias="Innkeeper"),
@@ -147,7 +148,7 @@ class TestCreateEntity:
         with pytest.raises(ConflictError):
             await create_entity(
                 EntityCreate(
-                    entity_type="npc",
+                    entity_type="actor",
                     name="Larkfellow",
                     aliases=[
                         EntityAliasCreate(alias="Innkeeper"),
@@ -237,33 +238,29 @@ class TestGetEntityWithAliases:
 
     @pytest.mark.asyncio
     async def test_assembles_aliases(self) -> None:
-        """Aliases are loaded explicitly and attached to the entity."""
+        """Aliases are read from the loaded relationship and attached."""
         entity_id = uuid4()
+        entity = make_entity(
+            id=entity_id,
+            aliases=[make_alias(entity_id, "Host"), make_alias(entity_id, "Innkeeper")],
+        )
         repo = entity_repo_stub()
-        repo.get.return_value = make_entity(id=entity_id)
-        alias_repo = alias_repo_stub()
-        alias_repo.get_by_entity.return_value = [
-            make_alias(entity_id, "Host"),
-            make_alias(entity_id, "Innkeeper"),
-        ]
+        repo.get_with.return_value = entity
 
-        result = await get_entity_with_aliases(entity_id, repo, alias_repo)
+        result = await get_entity_with_aliases(entity_id, repo)
 
         assert isinstance(result, EntityWithAliasesRead)
         assert [alias.alias for alias in result.aliases] == ["Host", "Innkeeper"]
-        alias_repo.get_by_entity.assert_awaited_once_with(entity_id)
+        repo.get_with.assert_awaited_once_with(entity_id, "aliases")
 
     @pytest.mark.asyncio
     async def test_missing_entity_is_not_found(self) -> None:
-        """An unknown entity yields NotFoundError without querying aliases."""
+        """An unknown entity yields NotFoundError."""
         repo = entity_repo_stub()
-        repo.get.return_value = None
-        alias_repo = alias_repo_stub()
+        repo.get_with.return_value = None
 
         with pytest.raises(NotFoundError):
-            await get_entity_with_aliases(uuid4(), repo, alias_repo)
-
-        alias_repo.get_by_entity.assert_not_awaited()
+            await get_entity_with_aliases(uuid4(), repo)
 
 
 class TestListEntities:
@@ -278,7 +275,7 @@ class TestListEntities:
 
         items, total = await list_entities(
             repo,
-            entity_type="npc",
+            entity_type="actor",
             name_contains="mir",
             offset=20,
             limit=10,
@@ -287,10 +284,10 @@ class TestListEntities:
         assert total == 1
         assert [item.name for item in items] == ["Mirek"]
         repo.list_filtered.assert_awaited_once_with(
-            entity_type="npc", name_contains="mir", offset=20, limit=10
+            entity_type="actor", name_contains="mir", offset=20, limit=10
         )
         repo.count_filtered.assert_awaited_once_with(
-            entity_type="npc", name_contains="mir"
+            entity_type="actor", name_contains="mir"
         )
 
     @pytest.mark.asyncio
@@ -360,23 +357,29 @@ class TestUpdateEntity:
 
 
 class TestSoftDeleteEntity:
-    """Tests for the soft_delete_entity use case."""
+    """Tests for the soft_delete_entity use case.
+
+    The cascade itself is asserted in the repository tests, where the rows are
+    actually stamped. What matters here is that the use case delegates and
+    translates a missing entity.
+    """
 
     @pytest.mark.asyncio
-    async def test_deletes_existing_entity(self) -> None:
-        """A soft delete delegates to the repository."""
+    async def test_delegates_to_the_repository(self) -> None:
+        """The repository owns the cascade, so the use case only delegates."""
         repo = entity_repo_stub()
         entity_id = uuid4()
+        repo.soft_delete_with_specializations.return_value = True
 
         await soft_delete_entity(entity_id, repo)
 
-        repo.soft_delete.assert_awaited_once_with(entity_id)
+        repo.soft_delete_with_specializations.assert_awaited_once_with(entity_id)
 
     @pytest.mark.asyncio
     async def test_missing_entity_is_not_found(self) -> None:
         """Deleting an unknown entity yields NotFoundError."""
         repo = entity_repo_stub()
-        repo.soft_delete.return_value = False
+        repo.soft_delete_with_specializations.return_value = False
 
         with pytest.raises(NotFoundError):
             await soft_delete_entity(uuid4(), repo)

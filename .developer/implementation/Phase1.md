@@ -130,7 +130,7 @@
 
 ### P1B.2 — Specialized Entity APIs
 
-**Status:** `Planning` — design agreed, not started
+**Status:** `Completed`
 
 **Goal:** Manage the stable canonical fields that only apply to one entity type, reached through real ORM relationships on `Entity`.
 
@@ -183,7 +183,7 @@ The same five endpoints exist for `players`, `player-characters`, `locations`, `
 
 **Application:** Use-case functions in `app/application/entities/` alongside the core use cases, one module per type. No service layer.
 **Repository:** `EntityRepository` plus `ActorRepository`, `PlayerRepository`, `PlayerCharacterRepository`, `LocationRepository`, `ItemRepository`, `FactionRepository`.
-**Schemas:** `EntityType` (new `StrEnum` in `app/schemas/entity.py`, the only place entity types are declared) and `EntityKeyMixin` (in `app/schemas/common.py`), per-type create/update models, and per-type read models composed as `EntityKeyMixin + TimestampMixin` with the base entity embedded.
+**Schemas:** `EntityType` (new `StrEnum` in `app/schemas/entity.py`, the only place entity types are declared) and `EntityKeyMixin` (in `app/schemas/common.py`), per-type create/update models, and per-type read models composed as `EntityKeyMixin` with the base entity embedded and no timestamps of their own, so the entity's `created_at` is the only one on the wire.
 
 #### Schema and model corrections required first
 
@@ -201,15 +201,21 @@ Two committed P1B.1 behaviours become wrong once the enum exists. They are corre
 #### Validation
 
 - Every write resolves the parent entity through the campaign-scoped `EntityRepository`, so a cross-campaign id is a 404 before any type check runs.
-- The entity's `entity_type` must equal the endpoint's type, otherwise 422.
+- The entity's `entity_type` must equal the endpoint's type, otherwise **404, not 422**. A wrong-type id, another campaign's id, an id that does not exist, and an entity whose specialization has not been created yet are deliberately indistinguishable, so a caller cannot use the response to learn which identifiers exist in campaigns they cannot see. The type predicate is part of the query for the same reason: a wrong-type row is never loaded and then rejected.
+- Unknown fields are rejected rather than dropped. The specialized tables have few columns, so a client that guesses a field name would otherwise get a 201 and a response that looks like the value was saved. `extra="forbid"` on every specialized request turns that into a 422 naming the field.
 - `POST` against an entity that already has a live specialization is a 409.
-- `Player.user_id` must reference an existing user.
+- `Player.user_id` must reference an existing user. Nothing currently prevents two player rows in the same campaign from claiming the same user, and the right fix is not obvious, so it is left alone rather than guessed at. A global unique constraint on `players.user_id` would also stop a gamemaster who owns players in two campaigns, and a per-campaign constraint is not expressible because these tables deliberately have no `campaign_id`. Enforcing "one player per user per campaign" therefore needs either a denormalized `campaign_id` or a partial unique index that resolves the campaign through the entity, and that is a schema decision for P1C, not a side effect of this phase.
 - `PlayerCharacter.player_id` must reference a player **in the same campaign**. The foreign key alone will not catch a cross-campaign link, so this is validated explicitly.
 - Reads exclude soft-deleted specializations and soft-deleted entities.
 
 #### Tests
 
-Type enforcement on every type; cross-campaign 404 on read, write, and delete; `PlayerCharacter` cross-campaign `player_id` rejection; duplicate specialization 409; soft-deleted specialization invisible through both the relationship and the endpoint; embedded base entity present and correct; `entity_type` immutability rejected with 422; campaign scoping asserted against compiled SQL.
+Type enforcement on every type; cross-campaign 404 on read, write, and delete; `PlayerCharacter` cross-campaign `player_id` rejection; duplicate specialization 409; soft-deleted specialization invisible through both the relationship and the endpoint; embedded base entity present and correct; `entity_type` immutability rejected with 422; campaign scoping asserted against compiled SQL; `list` and `count` sharing one predicate so a page is never short; a single `created_at` on the wire.
+
+Two rules earned their tests through live-database failures that the mocked tests could not have caught, because both were invisible at the unit level:
+
+- **`PATCH /players/{id}` could never succeed.** Repository link validation demanded `user_id` on every write, so a status-only update failed with "user_id is required". Link validation now applies only when the field is actually supplied. The update schema does not declare `user_id` at all, which is what makes the link immutable.
+- **Paging could come back short.** `list` applied offset and limit to entities and then dropped the ones with no specialization row, while `count` counted every entity of the right type. Both now share one `EXISTS` predicate, so the total always equals the number of rows a client can page through.
 
 ---
 

@@ -13,12 +13,16 @@ import pytest
 from sqlalchemy import Select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import EntityAlias
+from app.models import Entity, EntityAlias
 from app.repositories.entity_repo import (
+    SPECIALIZATION_RELATIONSHIPS,
     EntityAliasRepository,
     EntityRepository,
     escape_like,
 )
+from app.schemas.entity import EntityType
+
+NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def result_stub(rows: list[object] | None = None, scalar: object = 0) -> MagicMock:
@@ -123,7 +127,7 @@ class TestEntityRepositoryScoping:
         session.execute.return_value = result_stub(scalar=7)
         repo = EntityRepository(session, campaign_id)
 
-        assert await repo.count_filtered(entity_type="npc") == 7
+        assert await repo.count_filtered(entity_type="actor") == 7
         assert "entities.entity_type" in sql(session)
 
 
@@ -226,7 +230,7 @@ class TestBaseRepositoryCreateAndUpdate:
         session = AsyncMock(spec=AsyncSession)
         repo = EntityRepository(session, campaign_id)
 
-        await repo.create(entity_type="npc", name="Larkfellow")
+        await repo.create(entity_type="actor", name="Larkfellow")
 
         assert session.add.call_args[0][0].campaign_id == campaign_id
 
@@ -302,3 +306,113 @@ class TestEntityAliasRepository:
         await EntityAliasRepository(session, uuid4()).get(uuid4())
 
         assert "entity_aliases.deleted_at IS NULL" in sql(session)
+
+
+class TestSoftDeleteWithSpecializations:
+    """Deleting an entity must not leave a live specialization behind."""
+
+    def make_entity_with(self, **specializations: Any) -> MagicMock:
+        """Build an entity with every specialization attribute set."""
+        entity = MagicMock()
+        entity.id = uuid4()
+        entity.created_at = NOW
+        entity.updated_at = NOW
+        entity.deleted_at = None
+        for name in SPECIALIZATION_RELATIONSHIPS:
+            row = specializations.get(name)
+            if row is None:
+                row = MagicMock()
+                row.deleted_at = None
+            setattr(entity, name, row)
+        return entity
+
+    @pytest.mark.asyncio
+    async def test_stamps_entity_and_specialization_in_one_flush(self) -> None:
+        """Both rows are written by the same flush, so they cannot diverge."""
+        session = AsyncMock(spec=AsyncSession)
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        session.execute.return_value = result
+        repo = EntityRepository(session, uuid4())
+        entity = self.make_entity_with()
+        repo.get_with = AsyncMock(return_value=entity)  # type: ignore[method-assign]
+
+        deleted = await repo.soft_delete_with_specializations(entity.id)
+
+        assert deleted is True
+        assert entity.deleted_at is not None
+        for name in SPECIALIZATION_RELATIONSHIPS:
+            assert getattr(entity, name).deleted_at is not None
+        session.flush.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stamps_exactly_the_same_instant(self) -> None:
+        """One timestamp for both rows, so ordering between them is defined."""
+        session = AsyncMock(spec=AsyncSession)
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        session.execute.return_value = result
+        repo = EntityRepository(session, uuid4())
+        entity = self.make_entity_with()
+        repo.get_with = AsyncMock(return_value=entity)  # type: ignore[method-assign]
+
+        await repo.soft_delete_with_specializations(entity.id)
+
+        assert all(
+            getattr(entity, name).deleted_at == entity.deleted_at
+            for name in SPECIALIZATION_RELATIONSHIPS
+        )
+
+    @pytest.mark.asyncio
+    async def test_absent_specializations_are_left_alone(self) -> None:
+        """An entity with no specialization row is still deleted."""
+        session = AsyncMock(spec=AsyncSession)
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        session.execute.return_value = result
+        repo = EntityRepository(session, uuid4())
+        entity = self.make_entity_with()
+        for name in SPECIALIZATION_RELATIONSHIPS:
+            setattr(entity, name, None)
+        repo.get_with = AsyncMock(return_value=entity)  # type: ignore[method-assign]
+
+        deleted = await repo.soft_delete_with_specializations(entity.id)
+
+        assert deleted is True
+        assert entity.deleted_at is not None
+
+    @pytest.mark.asyncio
+    async def test_missing_entity_reports_not_deleted(self) -> None:
+        """Nothing is written when the entity is already gone or not visible."""
+        session = AsyncMock(spec=AsyncSession)
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        session.execute.return_value = result
+        repo = EntityRepository(session, uuid4())
+        repo.get_with = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        assert await repo.soft_delete_with_specializations(uuid4()) is False
+        session.flush.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_loads_every_specialization_relationship(self) -> None:
+        """All six are loaded, so no specialization is missed by the cascade."""
+        session = AsyncMock(spec=AsyncSession)
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        session.execute.return_value = result
+        repo = EntityRepository(session, uuid4())
+        entity = self.make_entity_with()
+        repo.get_with = AsyncMock(return_value=entity)  # type: ignore[method-assign]
+
+        await repo.soft_delete_with_specializations(entity.id)
+
+        assert repo.get_with.await_args.args[1:] == SPECIALIZATION_RELATIONSHIPS
+
+    def test_relationship_set_matches_the_entity_type_enum(self) -> None:
+        """The cascade cannot silently miss a type that was added later."""
+        assert set(SPECIALIZATION_RELATIONSHIPS) == {
+            entity_type.value for entity_type in EntityType
+        }
+        for name in SPECIALIZATION_RELATIONSHIPS:
+            assert hasattr(Entity, name)
