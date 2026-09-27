@@ -254,7 +254,7 @@ class StubAuthProvider:
 
 ## PP1.7 — Create Auth Middleware & Campaign Scope Dependencies
 
-**Status:** `Planning`
+**Status:** `Completed` (commit: 8a5983e)
 
 **Goal:** FastAPI dependencies for authentication and campaign-scoped repository injection.
 
