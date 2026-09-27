@@ -132,7 +132,7 @@ app/models/
 
 ## PP1.4 — Create Repository Base & Campaign-Scoped Query Pattern
 
-**Status:** `Planning`
+**Status:** `Completed` (commit: 9dbf192)
 
 **Goal:** Establish repository layer with automatic campaign isolation.
 
