@@ -55,3 +55,29 @@ Do not log raw audio, secrets, or complete transcripts by default.
 Use deterministic techniques first when they are sufficient. AI extraction
 must retain provenance and confidence. AI-generated suggestions require an
 explicit path to become canonical state.
+
+## Application Layer
+
+Application services are use-case oriented, not model-oriented.
+
+Do NOT create a service class for every database model (e.g., no `UserService`,
+`CampaignService`, `EntityService` just because those models exist).
+
+Instead, create application services for meaningful use cases:
+
+* `resolve_current_user` — maps external identity to local User
+* `get_current_campaign` — verifies campaign ownership
+* `ingest_document` — coordinates document parsing and persistence
+* `create_entity` — creates entity with aliases and specialized data
+* `extract_facts` — coordinates fact extraction and persistence
+* `process_transcript` — realtime transcript processing pipeline
+
+Rules:
+
+1. Application services own use-case orchestration, not models.
+2. Application services must not depend on FastAPI, WebSocket, or HTTP types.
+3. Application services coordinate repositories and integrations.
+4. Repositories handle persistence; application services handle workflows.
+5. No formal Domain layer without demonstrated need.
+6. Avoid "god services" — prefer small, cohesive modules/functions.
+7. Classes only when state/dependencies/lifecycle require them.

@@ -217,7 +217,7 @@ app/schemas/
 
 ## PP1.6 — Implement Stub OIDC Auth Provider Interface
 
-**Status:** `Planning`
+**Status:** `Completed` (commit: cf63533)
 
 **Goal:** Define authentication interface and stub implementation for local dev.
 

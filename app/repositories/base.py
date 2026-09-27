@@ -17,7 +17,7 @@ T = TypeVar("T", bound="DeclarativeBase")
 class BaseRepository(ABC, Generic[T]):
     """Base repository with automatic campaign isolation."""
 
-    def __init__(self, session: AsyncSession, campaign_id: UUID):
+    def __init__(self, session: AsyncSession, campaign_id: UUID | None = None):
         self.session = session
         self.campaign_id = campaign_id
 
@@ -29,7 +29,7 @@ class BaseRepository(ABC, Generic[T]):
 
     def _campaign_scope(self, stmt: Select[Any]) -> Select[Any]:
         """Apply campaign_id filter to query."""
-        if hasattr(self.model, "campaign_id"):
+        if self.campaign_id is not None and hasattr(self.model, "campaign_id"):
             return stmt.where(self.model.campaign_id == self.campaign_id)  # type: ignore[attr-defined]
         return stmt
 
@@ -61,7 +61,8 @@ class BaseRepository(ABC, Generic[T]):
 
     async def create(self, **kwargs: Any) -> T:
         """Create new record with campaign_id."""
-        kwargs.setdefault("campaign_id", self.campaign_id)
+        if self.campaign_id is not None:
+            kwargs.setdefault("campaign_id", self.campaign_id)
         obj = self.model(**kwargs)
         self.session.add(obj)
         await self.session.flush()

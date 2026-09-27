@@ -215,3 +215,111 @@ campaign scope, and repository dependencies. This structure scales cleanly as
 endpoints grow and prevents transport logic from leaking into services.
 
 **Status:** Approved — implement as PrePhase1 step.
+
+## ADR-016: Explicit application layer
+
+**Decision:** Introduce an explicit `app/application/` layer for use-case orchestration,
+separate from `app/api/` (transport), `app/repositories/` (persistence), and
+`app/integrations/` (external providers).
+
+**Structure:**
+```
+app/application/
+├── exceptions/
+├── users/           # resolve_current_user
+├── campaigns/       # get_current_campaign
+├── documents/       # ingest_document
+├── entities/        # create_entity, entity_matching
+├── facts/           # create_fact, invalidate_fact
+└── realtime/        # process_transcript
+```
+
+**Principles:**
+- Application services are use-case oriented, not model-oriented.
+- No service class per database model.
+- Application services coordinate repositories and integrations.
+- Application services must not depend on FastAPI, WebSocket, or HTTP types.
+- Repositories handle persistence; application services handle workflows.
+- No formal Domain layer without demonstrated need.
+
+**Reason:** Bard has operations involving multiple repositories and/or external
+integrations (document ingestion, transcript processing, fact extraction).
+These workflows should not live in HTTP/WebSocket handlers. An explicit
+application layer provides transport independence, testability, and clear
+orchestration ownership.
+
+**Status:** Approved — implement as PrePhase1 step (PP1.7).
+
+## ADR-017: Authentication as FastAPI dependency
+
+**Decision:** Implement authentication as FastAPI dependencies (`Depends(get_current_user)`)
+rather than global middleware.
+
+**Flow:**
+```
+Request
+    ↓
+Depends(get_current_identity)  → AuthProvider.validate_token()
+    ↓
+AuthenticatedIdentity
+    ↓
+Depends(get_current_user)      → UserRepository + resolve_current_user()
+    ↓
+Local User
+```
+
+**Reasons:**
+- Public endpoints (`/health`) should not require authentication.
+- Authentication requirements are endpoint-specific.
+- Dependencies compose naturally with campaign scope (`Depends(get_current_campaign)`).
+- Explicit endpoint requirements improve readability and testing.
+- Middleware would run on all routes including public endpoints.
+
+**Status:** Approved — implement as PrePhase1 step (PP1.7).
+
+## ADR-018: Campaign scope (Phase 1 = owner only)
+
+**Decision:** Phase 1 campaign access is owner-only. `CampaignMember` table exists
+but is not enforced for authorization.
+
+**Phase 1 flow:**
+```
+get_current_user
+    ↓
+get_current_campaign(campaign_id, user_id) → CampaignRepository
+    ↓
+if campaign.user_id != user_id: 403 Forbidden
+```
+
+**Phase 2+ (deferred):**
+- `CampaignMember` authorization with roles (`dm`, `player`, `viewer`).
+- Membership-based access replaces owner-only check.
+
+**Reason:** Phase 1 focuses on single-owner campaigns. The `CampaignMember`
+schema exists for future sharing but enforcement is deferred until a
+concrete sharing requirement exists.
+
+**Status:** Approved — implement as PrePhase1 step (PP1.7).
+
+## ADR-019: Realtime transport vs application behavior
+
+**Decision:** Separate WebSocket transport (`app/api/websocket/`) from realtime
+application behavior (`app/application/realtime/`).
+
+**Structure:**
+```
+app/
+├── api/
+│   └── websocket/
+│       ├── routes/stream.py      # WebSocket transport, message framing
+│       └── handlers/transcript.py
+└── application/
+    └── realtime/
+        └── process_transcript.py # Transcript → entity match → context cards
+```
+
+**Reason:** WebSocket is a transport mechanism. The realtime application
+logic (entity matching, knowledge retrieval, visibility filtering) should
+be transport-independent and reusable from HTTP endpoints or background jobs.
+
+**Status:** Approved — implement as PrePhase1 step (PP1.7).
