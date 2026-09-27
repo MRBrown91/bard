@@ -45,21 +45,21 @@ class Entity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # attribute is only readable when a repository explicitly asked for it with
     # selectinload. viewonly because writes go through the specialized
     # repositories, so no backref synchronization is wanted.
-    actor: Mapped["Actor | None"] = relationship(  # noqa: F821
+    actor: Mapped["Actor | None"] = relationship(
         "Actor",
         uselist=False,
         viewonly=True,
         lazy="raise_on_sql",
         primaryjoin="and_(Entity.id == Actor.entity_id, Actor.deleted_at.is_(None))",
     )
-    player: Mapped["Player | None"] = relationship(  # noqa: F821
+    player: Mapped["Player | None"] = relationship(
         "Player",
         uselist=False,
         viewonly=True,
         lazy="raise_on_sql",
         primaryjoin="and_(Entity.id == Player.entity_id, Player.deleted_at.is_(None))",
     )
-    player_character: Mapped["PlayerCharacter | None"] = relationship(  # noqa: F821
+    player_character: Mapped["PlayerCharacter | None"] = relationship(
         "PlayerCharacter",
         uselist=False,
         viewonly=True,
@@ -69,7 +69,7 @@ class Entity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "PlayerCharacter.deleted_at.is_(None))"
         ),
     )
-    location: Mapped["Location | None"] = relationship(  # noqa: F821
+    location: Mapped["Location | None"] = relationship(
         "Location",
         uselist=False,
         viewonly=True,
@@ -79,14 +79,14 @@ class Entity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "Location.deleted_at.is_(None))"
         ),
     )
-    item: Mapped["Item | None"] = relationship(  # noqa: F821
+    item: Mapped["Item | None"] = relationship(
         "Item",
         uselist=False,
         viewonly=True,
         lazy="raise_on_sql",
         primaryjoin="and_(Entity.id == Item.entity_id, Item.deleted_at.is_(None))",
     )
-    faction: Mapped["Faction | None"] = relationship(  # noqa: F821
+    faction: Mapped["Faction | None"] = relationship(
         "Faction",
         uselist=False,
         viewonly=True,
@@ -97,7 +97,7 @@ class Entity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     # Aliases. Ordering matches the explicit query so both read paths agree.
-    aliases: Mapped[list["EntityAlias"]] = relationship(  # noqa: F821
+    aliases: Mapped[list["EntityAlias"]] = relationship(
         "EntityAlias",
         viewonly=True,
         lazy="raise_on_sql",

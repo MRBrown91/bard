@@ -79,9 +79,16 @@ class SpecializedRepository[T: DeclarativeBase](ABC):
             raise self._not_found(entity_id)
         return entity, specialized
 
-    async def validate(self, **_payload: Any) -> None:
-        """Type-specific payload validation. Overridden where needed."""
-        return None
+    async def validate(self, **_payload: Any) -> None:  # noqa: B027
+        """Type-specific payload validation.
+
+        A no-op by default, overridden where a type has a link to check. Kept
+        concrete rather than abstract on purpose: four of the six types have
+        nothing to validate, and making them each declare an empty override
+        would be noise that reads as if validation were meaningful for them.
+        The payload is keyword-only and discarded, so a type without links
+        cannot silently swallow a field it does not understand.
+        """
 
     async def get(self, entity_id: UUID) -> tuple[Entity, T]:
         """Get a specialization together with its base entity."""
