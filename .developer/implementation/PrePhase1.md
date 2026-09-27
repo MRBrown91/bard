@@ -178,7 +178,7 @@ class BaseRepository:
 
 ## PP1.5 — Create Pydantic Schemas (API Boundaries)
 
-**Status:** `Planning`
+**Status:** `Completed` (commit: 9c5b691)
 
 **Goal:** Define request/response models for all Phase 1 APIs.
 
