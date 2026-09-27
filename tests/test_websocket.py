@@ -9,7 +9,7 @@ client = TestClient(app)
 
 def test_transcript_acknowledgement() -> None:
     """Transcript messages receive a deterministic acknowledgement."""
-    with client.websocket_connect("/ws/stream") as websocket:
+    with client.websocket_connect("/ws/stream?token=test-token") as websocket:
         websocket.send_json({"transcript": "You approach LarkFellow."})
         response = websocket.receive_json()
 

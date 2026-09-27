@@ -19,6 +19,13 @@ SessionFactory = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
-    """Yield an application database session."""
-    async with SessionFactory() as session:
+    """Yield an application database session with explicit commit."""
+    session = SessionFactory()
+    try:
         yield session
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+    finally:
+        await session.close()

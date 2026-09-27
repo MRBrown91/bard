@@ -3,7 +3,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, Header, HTTPException, Path, status
+from fastapi import Depends, Header, HTTPException, Path, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -90,9 +90,13 @@ async def get_current_campaign(
 # --- Campaign-Scoped Repository Factories ---
 
 async def get_campaign_repo(
-    campaign_id: Annotated[UUID, Path()],
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CampaignRepository:
+    """Get campaign repository. Extracts campaign_id from path if present."""
+    campaign_id = request.path_params.get("campaign_id")
+    if campaign_id:
+        campaign_id = UUID(campaign_id)
     return CampaignRepository(session, campaign_id)
 
 

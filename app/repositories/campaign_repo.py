@@ -22,6 +22,13 @@ class CampaignRepository(BaseRepository[Campaign]):
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def count_for_user(self, user_id: UUID) -> int:
+        """Count campaigns owned by a user."""
+        from sqlalchemy import func
+        stmt = select(func.count()).select_from(Campaign).where(Campaign.user_id == user_id)
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
+
     async def get_with_owner(self, id: UUID) -> Campaign | None:
         """Get campaign with owner loaded."""
         stmt = select(Campaign).where(Campaign.id == id)
@@ -76,3 +83,35 @@ class SessionRepository(BaseRepository[Session]):
         ).order_by(Session.started_at.desc())
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def list_by_campaign(self, campaign_id: UUID, *, offset: int = 0, limit: int = 100) -> list[Session]:
+        """List sessions for a campaign with pagination."""
+        stmt = select(Session).where(Session.campaign_id == campaign_id).offset(offset).limit(limit)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def count_by_campaign(self, campaign_id: UUID) -> int:
+        """Count sessions for a campaign."""
+        from sqlalchemy import func
+        stmt = select(func.count()).select_from(Session).where(Session.campaign_id == campaign_id)
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
+
+    async def list_active(self, campaign_id: UUID, *, offset: int = 0, limit: int = 100) -> list[Session]:
+        """List active sessions for a campaign with pagination."""
+        stmt = select(Session).where(
+            Session.campaign_id == campaign_id,
+            Session.ended_at.is_(None),
+        ).offset(offset).limit(limit).order_by(Session.started_at.desc())
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def count_active(self, campaign_id: UUID) -> int:
+        """Count active sessions for a campaign."""
+        from sqlalchemy import func
+        stmt = select(func.count()).select_from(Session).where(
+            Session.campaign_id == campaign_id,
+            Session.ended_at.is_(None),
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
