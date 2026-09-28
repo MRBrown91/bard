@@ -1,12 +1,15 @@
 """Campaign CRUD API endpoints."""
 
-from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import CurrentCampaign, CurrentUser, get_campaign_repo, get_session_repo
-from app.models import Campaign
+from app.api.dependencies import (
+    CurrentCampaign,
+    CurrentUser,
+    get_campaign_repo,
+    get_session_repo,
+)
 from app.repositories import CampaignRepository, SessionRepository
 from app.schemas.campaign import (
     CampaignCreate,
@@ -107,46 +110,64 @@ async def delete_campaign(
     await campaign_repo.soft_delete(campaign.id)
 
 
-# Campaign Members (stub for future sharing)
+# Campaign Members — Phase 2 work, deferred.
+#
+# These are registered but not implemented. Returning 501 is deliberate: an
+# earlier version returned 201 with the campaign body, which told a client its
+# member had been added when nothing was written, and the list endpoint
+# returned an empty list that was indistinguishable from "this campaign has no
+# members". Both lie about persistent state, so they refuse instead. The
+# repository already exists (CampaignMemberRepository); wiring these up is
+# Phase 2, alongside the membership-based authorization that replaces the
+# owner-only check. See ADR-011.
+
+_MEMBERS_NOT_IMPLEMENTED = "Campaign members are not implemented until Phase 2"
+
 
 @router.post(
     "/api/campaigns/{campaign_id}/members",
-    response_model=CampaignRead,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_501_NOT_IMPLEMENTED,
 )
 async def add_campaign_member(
     campaign_id: UUID,
-    member_data: dict[str, Any],
     campaign: CurrentCampaign,
-) -> CampaignRead:
-    """Add member to campaign. Owner only (stub)."""
-    # TODO: Implement CampaignMemberRepository.create
-    return CampaignRead.model_validate(campaign)
+) -> None:
+    """Not implemented. Campaign sharing arrives in Phase 2."""
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail=_MEMBERS_NOT_IMPLEMENTED,
+    )
 
 
 @router.get(
     "/api/campaigns/{campaign_id}/members",
-    response_model=list[dict[str, Any]],
+    status_code=status.HTTP_501_NOT_IMPLEMENTED,
 )
 async def list_campaign_members(
+    campaign_id: UUID,
     campaign: CurrentCampaign,
-) -> list[dict[str, Any]]:
-    """List campaign members. Owner only (stub)."""
-    # TODO: Implement CampaignMemberRepository.get_members
-    return []
+) -> None:
+    """Not implemented. Campaign sharing arrives in Phase 2."""
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail=_MEMBERS_NOT_IMPLEMENTED,
+    )
 
 
 @router.delete(
     "/api/campaigns/{campaign_id}/members/{member_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
+    status_code=status.HTTP_501_NOT_IMPLEMENTED,
 )
 async def remove_campaign_member(
-    campaign: CurrentCampaign,
+    campaign_id: UUID,
     member_id: UUID,
+    campaign: CurrentCampaign,
 ) -> None:
-    """Remove member from campaign. Owner only (stub)."""
-    # TODO: Implement CampaignMemberRepository.delete
-    pass
+    """Not implemented. Campaign sharing arrives in Phase 2."""
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail=_MEMBERS_NOT_IMPLEMENTED,
+    )
 
 
 # Sessions - nested under campaigns

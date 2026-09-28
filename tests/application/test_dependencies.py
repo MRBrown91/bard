@@ -113,17 +113,30 @@ class TestGetCurrentCampaign:
             await get_campaign_usecase(uuid4(), uuid4(), repo)
 
     @pytest.mark.asyncio
-    async def test_not_owner_raises_403(self) -> None:
-        """Non-owner user raises ForbiddenError."""
+    async def test_not_owner_is_indistinguishable_from_missing(self) -> None:
+        """A campaign owned by someone else raises the same 404 as a missing one.
+
+        Reporting 403 here would let any authenticated user probe campaign
+        identifiers and learn which exist, so the two cases are deliberately
+        identical — down to the message.
+        """
         repo = AsyncMock(spec=CampaignRepository)
         repo.get.return_value = Campaign(
             id=uuid4(),
             user_id=uuid4(),
             name="Test Campaign",
         )
+        campaign_id = uuid4()
 
-        with pytest.raises(ForbiddenError):
-            await get_campaign_usecase(uuid4(), uuid4(), repo)
+        with pytest.raises(NotFoundError) as owned:
+            await get_campaign_usecase(campaign_id, uuid4(), repo)
+
+        repo.get.return_value = None
+        with pytest.raises(NotFoundError) as missing:
+            await get_campaign_usecase(campaign_id, uuid4(), repo)
+
+        assert owned.value.message == missing.value.message == "Campaign not found"
+        assert owned.value.details == missing.value.details
 
     @pytest.mark.asyncio
     async def test_owner_returns_campaign(self) -> None:

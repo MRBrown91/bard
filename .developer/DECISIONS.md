@@ -312,12 +312,26 @@ get_current_user
     ↓
 get_current_campaign(campaign_id, user_id) → CampaignRepository
     ↓
-if campaign.user_id != user_id: 403 Forbidden
+if campaign missing OR campaign.user_id != user_id: 404 Not Found
 ```
+
+A campaign owned by someone else returns the same 404, with the same body, as a
+campaign that does not exist. A 403 would confirm the identifier is real, which
+lets any authenticated user enumerate campaign ids. There is nothing to protect
+by distinguishing them, because the non-owner's request fails either way. This
+matches the rule P1B.2 applies to entities and specializations, so ownership
+is checked the same way at both levels of the API.
 
 **Phase 2+ (deferred):**
 - `CampaignMember` authorization with roles (`dm`, `player`, `viewer`).
 - Membership-based access replaces owner-only check.
+
+`ForbiddenError` is retained in the error hierarchy but is not raised for
+ownership. It is reserved for refusing an action on a resource the caller can
+already see — a viewer attempting to edit a session, for example. Ownership
+itself stays a 404 so that existence cannot be probed; the moment ownership
+becomes a 403, the oracle returns. This is the one distinction to preserve when
+membership roles land.
 
 **Reason:** Phase 1 focuses on single-owner campaigns. The `CampaignMember`
 schema exists for future sharing but enforcement is deferred until a

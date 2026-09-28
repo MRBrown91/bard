@@ -273,7 +273,8 @@ app/api/
 **Verification:**
 1. Dependency injection works in test routes
 2. Unauthenticated requests return 401
-3. Cross-campaign access returns 403
+3. Access to a campaign the user does not own returns 404, identical to a
+   non-existent campaign, so campaign existence cannot be probed
 
 **Dependencies:** PP1.4, PP1.6
 
