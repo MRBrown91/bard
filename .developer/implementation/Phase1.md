@@ -223,7 +223,7 @@ Two rules earned their tests through live-database failures that the mocked test
 
 ### P1C.1 — Document CRUD API
 
-**Status:** `Planning`
+**Status:** `Completed`
 
 **Goal:** Manage source documents (campaign-level or session-level).
 
@@ -231,18 +231,38 @@ Two rules earned their tests through live-database failures that the mocked test
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/campaigns/{campaign_id}/documents` | Create document (type, title, content, optional session_id) |
-| GET | `/api/campaigns/{campaign_id}/documents` | List documents (filter by session_id, document_type) |
+| GET | `/api/campaigns/{campaign_id}/documents` | List documents (filter by session_id, document_type; paged, returns a total) |
 | GET | `/api/campaigns/{campaign_id}/documents/{document_id}` | Get document with statements |
-| PATCH | `/api/campaigns/{campaign_id}/documents/{document_id}` | Update document metadata |
+| PATCH | `/api/campaigns/{campaign_id}/documents/{document_id}` | Update document metadata. `campaign_id` is immutable and rejected with a 422 |
 | DELETE | `/api/campaigns/{campaign_id}/documents/{document_id}` | Soft delete document |
 
-**Service:** `DocumentService`
-**Repository:** `DocumentRepository`
-**Schemas:** `DocumentCreate`, `DocumentRead`, `DocumentUpdate`, `DocumentList`
+**Application:** Use-case functions in `app/application/documents/documents.py` (`create_document`, `get_document`, `list_documents`, `update_document`, `delete_document`). There is no `DocumentService`; the transport, use case, and repository layers are kept separate and the use cases stay thin.
+**Repository:** `DocumentRepository`, `DocumentStatementRepository`
+**Schemas:** `DocumentCreate`, `DocumentRead`, `DocumentUpdate`, `DocumentWithStatementsRead`, `DocumentFilter`, `DocumentStatementCreate`, `DocumentStatementRead`
 
-**Authorization:** Campaign owner.
+**Authorization:** Campaign owner, enforced by the `CurrentCampaign` dependency before any use case runs. The campaign is taken from the repository scope, never from the request body. `DocumentCreate` and `DocumentUpdate` use `extra="forbid"`, so a body carrying `campaign_id` is rejected with a 422 rather than silently ignored.
 
-**Tests:** Document + statement CRUD; session_id FK validation; campaign isolation.
+#### Decisions
+
+**A document and a statement hold different things, and neither is derived from the other.** `Document.content` is the verbatim text the fact chain points back to. `DocumentStatement.content` is one ordered anchor inside it. They are stored and updated independently and never synchronised, because the statements are the curated, reorderable, position-bearing view that extraction and citation depend on, and rewriting them from the document would discard the curation.
+
+**Tied positions are allowed, so the tiebreak is fixed.** `position` has no uniqueness constraint. Ordering is `(position, created_at, id)` in both the `Document.statements` relationship and `DocumentStatementRepository.get_by_document`, so a tie can never reorder between two reads, and the constant is asserted against the relationship so the two cannot drift apart.
+
+**Statements are scoped through their parent, because they have no `campaign_id`.** The base campaign scope is a no-op for a table without that column, so every scoped statement read joins `documents` and filters `documents.campaign_id`. The join condition also requires `documents.deleted_at IS NULL`, so a statement under a soft-deleted document is not reachable by id. Putting that predicate in the join rather than a `where` matters: a `where` on the right table of an inner join would let those rows back in.
+
+**Deleting a document stamps its statements in the same flush.** `soft_delete_with_statements` writes one timestamp to the document and to its loaded live statements and flushes once, so a cascade cannot be half-applied. Rows are retained rather than removed, because facts point at them.
+
+**`document_type` and `source_type` stay free text.** They are `min_length=1` strings with no enum, because neither has a settled vocabulary, and inventing one now would put a migration in front of the first real corpus.
+
+**Notes:**
+- `Document.statements` is `viewonly=True` with `lazy="raise_on_sql"`. P1C.2 owns statement writes; a view-only relationship cannot be used to smuggle them in through the document.
+- Listing returns a total, and the page and the total are built from one shared predicate, so `total` always equals the number of rows a client can page through.
+- PATCH only touches fields the caller sent. An absent field is left alone, never blanked.
+- `session_id` is validated against a campaign-scoped `SessionRepository` on create and on update, so a session from another campaign or a deleted one is refused with a generic 422. The message does not distinguish the two.
+
+**Tests:** 62 tests across `tests/api/test_documents.py` and `tests/repositories/test_document_repo.py`, covering CRUD, 422 mapping, extra-field rejection, campaign scoping asserted against compiled SQL, page/total predicate agreement, deterministic ordering, the cascade, and retained history.
+
+**Verified manually against the development database:** create, read with statements, filter by type and session, cross-campaign session refusal, cross-campaign read 404, patch, soft delete, and statement cascade. This surfaced a defect the mocked tests could not: the scoped statement join documented above did not actually exclude statements belonging to a soft-deleted document, because the deletion predicate was missing from the join condition. It is fixed and covered.
 
 ---
 

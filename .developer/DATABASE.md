@@ -222,6 +222,17 @@ deleted_at timestamp nullable
 
 A null `session_id` means campaign-level source material.
 
+`Document.content` is the verbatim text that the fact chain points back to.
+`DocumentStatement.content` is one ordered anchor inside it. The two are
+independent: they are never synchronised, and editing one does not rewrite the
+other. Statements are the curated, reorderable, position-bearing view that
+extraction and citation depend on, so regenerating them from the document text
+would throw that curation away.
+
+`document_type` and `source_type` are unconstrained strings, not enums. Neither
+has a settled vocabulary, and fixing one now would mean a migration in front of
+the first real corpus.
+
 ## DocumentStatement
 
 ```text
@@ -238,6 +249,19 @@ deleted_at timestamp nullable
 
 Facts point to statements rather than directly to documents. This preserves
 precise extraction provenance.
+
+`position` carries no uniqueness constraint, because curated ordering is
+meaningful and duplicates are legitimate. Read order is therefore
+`(position, created_at, id)`, fixed in both the `Document.statements`
+relationship and `DocumentStatementRepository.get_by_document`, so a tie cannot
+reorder between reads.
+
+`document_statements` has no `campaign_id` column, deliberately. Campaign
+isolation for a statement is resolved through its parent `Document`, so every
+scoped read joins `documents` and filters `documents.campaign_id`; the join also
+requires `documents.deleted_at IS NULL`, so a statement under a deleted document
+is unreachable. The generic repository campaign scope cannot do this on its own,
+because it is a no-op for a table without that column.
 
 ## EntityFact
 
@@ -374,7 +398,8 @@ context is constructed. The LLM is never the security boundary.
 - Every fact belongs to the same Campaign as its referenced entity/entities.
 - Every relationship fact has two entities in the same Campaign.
 - PlayerCharacter references a Player in the same Campaign through its entity.
-- Document statements cannot outlive their document.
+- Document statements cannot outlive their document. Soft-deleting a document stamps its live statements in the same flush, and the rows are retained, because facts reference them.
+- Document and statement content are independent. Neither is generated from the other.
 - Soft-deleted records are excluded from normal active queries. A soft-deleted specialization is treated as absent by the relationship and by the API.
 - Soft-deleting an entity also stamps its specialization in the same transaction.
 - Semantic invalidation is not equivalent to deletion.

@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, and_, func, select
 from sqlalchemy.orm import selectinload
 
 from app.models import Document, DocumentStatement
@@ -131,14 +131,20 @@ class DocumentStatementRepository(BaseRepository[DocumentStatement]):
     def _document_scope(self, stmt: Select[Any]) -> Select[Any]:
         """Join the parent document and apply both scopes.
 
-        The inner join also excludes statements whose document is soft-deleted
-        or belongs to another campaign, so a statement id from elsewhere is
-        simply absent rather than readable.
+        The inner join also excludes statements whose document is soft-deleted,
+        so a statement under a deleted document is not reachable by id. The
+        document's own deletion predicate belongs in the join condition rather
+        than a where clause, which would turn the join into an outer one and
+        let those rows back in.
         """
         if self.campaign_id is None:
             return stmt
         return stmt.join(
-            Document, Document.id == DocumentStatement.document_id
+            Document,
+            and_(
+                Document.id == DocumentStatement.document_id,
+                Document.deleted_at.is_(None),
+            ),
         ).where(Document.campaign_id == self.campaign_id)
 
     def filtered_stmt(self, document_id: UUID | None = None) -> Select[Any]:
