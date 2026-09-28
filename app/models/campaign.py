@@ -32,11 +32,6 @@ class Campaign(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __table_args__ = (Index("ix_campaigns_user_id", "user_id"),)
 
-    @property
-    def campaign_id(self) -> UUID:
-        """Alias for id to satisfy CampaignRead schema."""
-        return self.id
-
 
 class CampaignMember(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Future sharing membership for a campaign."""

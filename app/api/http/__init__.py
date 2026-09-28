@@ -2,10 +2,11 @@
 
 from fastapi import APIRouter
 
-from app.api.http.routes import health, campaigns
+from app.api.http.routes import health, campaigns, entities
 
 router = APIRouter()
 router.include_router(health.router)
 router.include_router(campaigns.router)
+router.include_router(entities.router)
 
 __all__ = ["router"]

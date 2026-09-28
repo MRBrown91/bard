@@ -1,10 +1,8 @@
 """Event repository."""
 
 from datetime import datetime
-from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Event
 from app.repositories.base import BaseRepository
@@ -25,7 +23,7 @@ class EventRepository(BaseRepository[Event]):
         status: str | None = None,
     ) -> list[Event]:
         """List events within date range."""
-        stmt = self._campaign_scope(select(Event))
+        stmt = self._active_scope(self._campaign_scope(select(Event)))
         if start:
             stmt = stmt.where(Event.occurred_at >= start)
         if end:

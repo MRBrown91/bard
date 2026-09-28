@@ -92,6 +92,12 @@ deleted_at timestamp nullable
 Entity represents durable identity. Specialized tables hold stable canonical
 fields. Facts and relationships hold evolving or historical information.
 
+`entity_type` is validated in the application against a six-value enum —
+`actor`, `player`, `player_character`, `location`, `item`, `faction` — and is
+immutable once set. The column remains `varchar(50)` with no CHECK constraint
+until Phase 2 (ADR-011, ADR-020). An NPC is an `actor`; there is no separate
+`npc` type.
+
 ## EntityAlias
 
 ```text
@@ -148,8 +154,75 @@ purpose text nullable
 description text nullable
 ```
 
+Each of these also carries `created_at`, `updated_at`, and nullable
+`deleted_at` from `TimestampMixin`. `entity_id` is both primary key and
+foreign key, so each table is a strict one-to-one extension of `entities`
+rather than table-per-class inheritance, and a specialized row shares the
+UUID of its entity.
+
+None of these tables has a `campaign_id` column, and none will get one. A
+specialized row reaches its campaign only through `entity_id` →
+`entities.campaign_id`, so campaign filtering is defined once on the entity
+rather than repeated six times. See ADR-021.
+
+Two further consequences of `entity_id` being the primary key: an id can never
+belong to two types at once, and a specialized row cannot be orphaned onto a
+deleted entity by a foreign key alone. Reads resolve the parent entity first,
+so a soft-deleted entity hides its specialization as well.
+
 Specialized tables intentionally remain small. Evolving facts such as current
 location, ownership, injury, relationships, or character state belong in facts.
+
+## Child tables referencing Entity
+
+```text
+Table                       Column                  References
+entity_aliases              entity_id               entities.id
+actors                      entity_id               entities.id
+players                     entity_id               entities.id
+player_characters           entity_id               entities.id
+player_characters           player_id               players.entity_id
+locations                   entity_id               entities.id
+items                       entity_id               entities.id
+factions                    entity_id               entities.id
+entity_facts                entity_id               entities.id
+entity_facts                campaign_id             campaigns.id
+entity_relationship_facts   source_entity_id        entities.id
+entity_relationship_facts   target_entity_id        entities.id
+entity_relationship_facts   campaign_id             campaigns.id
+```
+
+Every foreign key runs one way, child to parent, so no cycle exists and no
+table needs to be inserted before another. Entity creation is therefore
+unconstrained: the entity is inserted first and its specialization second,
+with no mutual dependency. `entity_facts` and `entity_relationship_facts` do
+carry their own `campaign_id` and are filtered by it directly.
+
+No foreign key uses `ON DELETE CASCADE`. Soft deletion is application-level
+and stamps `deleted_at` on the parent and its specialization in one
+transaction, preserving history for retcons (ADR-010).
+
+### One row per flush
+
+The unit of work orders a flush by `relationship()` declarations, not by
+foreign key columns. This schema expresses ownership as foreign key columns
+without ORM relationships, so an `entities` row and its `campaigns` parent
+have no dependency edge and can be emitted in either order. Adding both to one
+session and committing once produces `IntegrityError` on the child's foreign
+key, because the parent has not been written.
+
+This is documented SQLAlchemy behaviour, not a defect, and the models are
+deliberately built this way (ADR-021, ADR-023). Every write path therefore
+flushes one row at a time. There are three: `BaseRepository.create`,
+`SpecializedRepository.create`, and `resolve_current_user`, each of which adds
+and flushes immediately. A write that needs several rows must flush the parent
+explicitly in between. `tests/repositories/test_one_row_per_flush.py` guards
+this.
+
+This matters for DELETE as well as INSERT. Bulk cleanup has to remove children
+before parents regardless of ORM ordering, which is what makes
+`soft_delete_with_statements` stamp the parent and its children in one flush
+rather than issuing separate deletes.
 
 ## Document
 
@@ -171,6 +244,17 @@ deleted_at timestamp nullable
 
 A null `session_id` means campaign-level source material.
 
+`Document.content` is the verbatim text that the fact chain points back to.
+`DocumentStatement.content` is one ordered anchor inside it. The two are
+independent: they are never synchronised, and editing one does not rewrite the
+other. Statements are the curated, reorderable, position-bearing view that
+extraction and citation depend on, so regenerating them from the document text
+would throw that curation away.
+
+`document_type` and `source_type` are unconstrained strings, not enums. Neither
+has a settled vocabulary, and fixing one now would mean a migration in front of
+the first real corpus.
+
 ## DocumentStatement
 
 ```text
@@ -187,6 +271,19 @@ deleted_at timestamp nullable
 
 Facts point to statements rather than directly to documents. This preserves
 precise extraction provenance.
+
+`position` carries no uniqueness constraint, because curated ordering is
+meaningful and duplicates are legitimate. Read order is therefore
+`(position, created_at, id)`, fixed in both the `Document.statements`
+relationship and `DocumentStatementRepository.get_by_document`, so a tie cannot
+reorder between reads.
+
+`document_statements` has no `campaign_id` column, deliberately. Campaign
+isolation for a statement is resolved through its parent `Document`, so every
+scoped read joins `documents` and filters `documents.campaign_id`; the join also
+requires `documents.deleted_at IS NULL`, so a statement under a deleted document
+is unreachable. The generic repository campaign scope cannot do this on its own,
+because it is a no-op for a table without that column.
 
 ## EntityFact
 
@@ -313,13 +410,37 @@ deleted_at timestamp nullable
 Visibility is fact-level. Retrieval must enforce visibility before player-facing
 context is constructed. The LLM is never the security boundary.
 
+**The audience tables carry no `campaign_id`.** A rule is in a campaign only
+through its fact, so a campaign-scoped read has to join to the parent fact and
+filter on `entity_facts.campaign_id`. The join also requires
+`entity_facts.deleted_at IS NULL`: without it, deleting a fact would leave its
+rules readable through the audience repository, because a soft-deleted parent
+is still a row that joins. Both conditions live in the repository's shared
+statement builder, so no audience read can accidentally omit them.
+
+**`audience_type` and `player_id` are paired by the application,** not by the
+schema, because ADR-011 defers database CHECK constraints. `player` requires a
+`player_id`; no other type may carry one. A `player_id` is additionally
+resolved through the campaign-scoped `PlayerRepository` on write. The pairing
+alone would accept any uuid, including one from another campaign, so the two
+checks are not redundant.
+
+**Audience rules are stored in Phase 1 but not enforced.** See ADR-025. The
+enforcement is a query filter to be added in Phase 2, before the first read that
+is not owner-only.
+
 ## Invariants
 
 - Every Entity belongs to exactly one Campaign.
+- Every `entity_type` is one of the six enum values and never changes after creation.
+- Every entity type has exactly one specialization table, so every entity eventually has exactly one specialized row.
+- Specialized tables carry no `campaign_id`; a specialized row is in a campaign only through its entity. A cross-campaign read is impossible by construction, and the foreign key on `player_characters.player_id` alone does not guarantee same-campaign links — that is validated in the application.
 - Entity aliases cannot cross campaigns through their entity.
 - Every fact belongs to the same Campaign as its referenced entity/entities.
 - Every relationship fact has two entities in the same Campaign.
 - PlayerCharacter references a Player in the same Campaign through its entity.
-- Document statements cannot outlive their document.
-- Soft-deleted records are excluded from normal active queries.
+- Document statements cannot outlive their document. Soft-deleting a document stamps its live statements in the same flush, and the rows are retained, because facts reference them.
+- Document and statement content are independent. Neither is generated from the other.
+- Soft-deleted records are excluded from normal active queries. A soft-deleted specialization is treated as absent by the relationship and by the API.
+- Soft-deleting an entity also stamps its specialization in the same transaction.
 - Semantic invalidation is not equivalent to deletion.

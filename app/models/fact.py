@@ -4,13 +4,19 @@ from uuid import UUID
 
 from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.audience import EntityFactAudience, EntityRelationshipFactAudience
 
 
 class EntityFact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Atomic claim about one entity."""
+    """Atomic claim about one entity.
+
+    ``content`` is the claim as stated. It is never regenerated from the
+    referenced ``statement_id``; the statement is provenance, and editing one
+    must not silently rewrite the other.
+    """
 
     __tablename__ = "entity_facts"
 
@@ -31,6 +37,26 @@ class EntityFact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     confidence: Mapped[float | None] = mapped_column(Float)
     importance: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="active")
+
+    # The audience rules attached to this fact. viewonly because the writes go
+    # through the audience repositories, so no backref synchronization is
+    # wanted. lazy="raise_on_sql" keeps an accidental access from issuing IO
+    # outside the greenlet context; the attribute is only readable when a
+    # repository explicitly asked for it with selectinload. The deleted_at test
+    # in primaryjoin is what stops a soft-deleted rule loading as though it were
+    # live. The table has no campaign_id, so the relationship carries campaign
+    # isolation only through this fact; a scoped query still has to join.
+    audiences: Mapped[list[EntityFactAudience]] = relationship(
+        "EntityFactAudience",
+        uselist=True,
+        viewonly=True,
+        lazy="raise_on_sql",
+        primaryjoin=(
+            "and_(EntityFact.id == EntityFactAudience.fact_id, "
+            "EntityFactAudience.deleted_at.is_(None))"
+        ),
+        order_by=lambda: (EntityFactAudience.created_at, EntityFactAudience.id),
+    )
 
     __table_args__ = (
         Index("ix_entity_facts_campaign_entity", "campaign_id", "entity_id"),
@@ -64,6 +90,22 @@ class EntityRelationshipFact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     confidence: Mapped[float | None] = mapped_column(Float)
     importance: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="active")
+
+    # See EntityFact.audiences. Same reasoning, same shape.
+    audiences: Mapped[list[EntityRelationshipFactAudience]] = relationship(
+        "EntityRelationshipFactAudience",
+        uselist=True,
+        viewonly=True,
+        lazy="raise_on_sql",
+        primaryjoin=(
+            "and_(EntityRelationshipFact.id == EntityRelationshipFactAudience.fact_id, "
+            "EntityRelationshipFactAudience.deleted_at.is_(None))"
+        ),
+        order_by=lambda: (
+            EntityRelationshipFactAudience.created_at,
+            EntityRelationshipFactAudience.id,
+        ),
+    )
 
     __table_args__ = (
         Index(

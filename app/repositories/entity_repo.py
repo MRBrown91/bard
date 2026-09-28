@@ -1,137 +1,301 @@
 """Entity repository with alias support."""
 
-from typing import cast
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy import Select, and_, func, or_, select
+from sqlalchemy.orm import aliased, selectinload
 
 from app.models import Entity, EntityAlias
-from app.models.entity.entity_types import Actor, Player, PlayerCharacter, Location, Item, Faction
 from app.repositories.base import BaseRepository
+from app.schemas.entity import EntityType
+
+# The six one-to-one specializations declared on Entity. Derived from the enum
+# so the set cannot drift from the types that actually have a table.
+SPECIALIZATION_RELATIONSHIPS: tuple[str, ...] = tuple(
+    entity_type.value for entity_type in EntityType
+)
+
+LIKE_ESCAPE = "\\"
+
+
+def escape_like(term: str) -> str:
+    """Escape LIKE wildcards so user input is matched literally."""
+    for char in ("\\", "%", "_"):
+        term = term.replace(char, LIKE_ESCAPE + char)
+    return term
+
+
+@dataclass(frozen=True, slots=True)
+class MatchTerm:
+    """One string the entity matcher can recognize, and what it belongs to.
+
+    ``term`` is the name or the alias; ``name`` is always the entity's own
+    name, so a caller can label a result without a second lookup. Keeping the
+    pair here is what lets the matcher return the right display name for a hit
+    that came from an alias.
+    """
+
+    entity_id: UUID
+    name: str
+    term: str
+    is_alias: bool
+
 
 
 class EntityRepository(BaseRepository[Entity]):
-    """Repository for Entity operations."""
+    """Repository for Entity operations.
+
+    Reads exclude soft-deleted rows so that retention of invalid history does
+    not make deleted entities visible to the application.
+    """
 
     @property
     def model(self) -> type[Entity]:
         return Entity
 
-    async def get_with_aliases(self, id: UUID) -> Entity | None:
-        """Get entity with aliases loaded."""
-        stmt = self._campaign_scope(
-            select(Entity)
-            .options(selectinload(Entity.aliases))  # type: ignore[attr-defined]
-            .where(Entity.id == id)
-        )
+    async def get(self, id: UUID) -> Entity | None:
+        """Get a non-deleted entity by ID with campaign scope."""
+        stmt = self._active_scope(select(Entity).where(Entity.id == id))
+        stmt = self._campaign_scope(stmt)
         result = await self.session.execute(stmt)
-        return cast(Entity | None, result.scalar_one_or_none())
+        return result.scalar_one_or_none()
 
-    async def get_with_specialized(self, id: UUID) -> Entity | None:
-        """Get entity with all specialized types loaded."""
-        stmt = self._campaign_scope(
-            select(Entity)
-            .options(
-                selectinload(Entity.actor),  # type: ignore[attr-defined]
-                selectinload(Entity.player),  # type: ignore[attr-defined]
-                selectinload(Entity.player_character),  # type: ignore[attr-defined]
-                selectinload(Entity.location),  # type: ignore[attr-defined]
-                selectinload(Entity.item),  # type: ignore[attr-defined]
-                selectinload(Entity.faction),  # type: ignore[attr-defined]
+    def filtered_stmt(
+        self, entity_type: str | None, name_contains: str | None
+    ) -> Select[Any]:
+        """Build the campaign-scoped, filtered entity select.
+
+        Public so repositories that extend entity queries — the specialized
+        repositories — can add their own predicates without duplicating the
+        scope and escaping rules.
+        """
+        stmt = self._campaign_scope(self._active_scope(select(Entity)))
+        if entity_type is not None:
+            stmt = stmt.where(Entity.entity_type == entity_type)
+        if name_contains is not None:
+            pattern = f"%{escape_like(name_contains)}%"
+            stmt = stmt.where(
+                or_(
+                    Entity.name.ilike(pattern, escape=LIKE_ESCAPE),
+                    Entity.description.ilike(pattern, escape=LIKE_ESCAPE),
+                )
             )
-            .where(Entity.id == id)
+        return stmt
+
+    def _filtered(
+        self, entity_type: str | None, name_contains: str | None
+    ) -> Select[Any]:
+        """Backwards-compatible alias for :meth:`filtered_stmt`."""
+        return self.filtered_stmt(entity_type, name_contains)
+
+    async def list_filtered(
+        self,
+        *,
+        entity_type: str | None = None,
+        name_contains: str | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> list[Entity]:
+        """List entities for the scoped campaign with optional filters."""
+        stmt = self._filtered(entity_type, name_contains).order_by(
+            Entity.created_at.desc()
         )
+        stmt = stmt.offset(offset).limit(limit)
         result = await self.session.execute(stmt)
-        return cast(Entity | None, result.scalar_one_or_none())
+        return cast(list[Entity], list(result.scalars().all()))
+
+    async def count_filtered(
+        self,
+        *,
+        entity_type: str | None = None,
+        name_contains: str | None = None,
+    ) -> int:
+        """Count entities matching the same filters as ``list_filtered``."""
+        stmt = self._filtered(entity_type, name_contains)
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        result = await self.session.execute(count_stmt)
+        return result.scalar_one()
+
+    async def list_match_terms(self) -> list[MatchTerm]:
+        """List every name and alias the matcher can recognize.
+
+        One term per name and one per alias, so an entity contributes its own
+        name whether or not it has aliases. Returns plain values rather than
+        ``Entity`` objects because the matcher compares strings and ids:
+        loading descriptions, timestamps, and the specializations it will never
+        read would make every transcript message pay for a full entity load.
+
+        Two queries rather than one outer join. A join cannot express "the
+        name, and also every alias": it returns one row per (entity, alias)
+        pair, so an entity that *has* an alias would contribute only its alias
+        and never its own name, and the more aliases an entity had the less
+        matchable it would become. Two scoped projections say exactly that.
+        """
+        names_stmt = self._campaign_scope(
+            self._active_scope(cast(Select[Any], select(Entity.id, Entity.name)))
+        )
+        name_rows = await self.session.execute(names_stmt)
+        terms = [
+            MatchTerm(entity_id=row.id, name=row.name, term=row.name, is_alias=False)
+            for row in name_rows
+        ]
+
+        alias_stmt = self._campaign_scope(
+            self._active_scope(
+                cast(
+                    Select[Any],
+                    select(Entity.id, Entity.name, EntityAlias.alias).join(
+                        EntityAlias,
+                        and_(
+                            EntityAlias.entity_id == Entity.id,
+                            EntityAlias.deleted_at.is_(None),
+                        ),
+                    ),
+                )
+            )
+        )
+        alias_rows = await self.session.execute(alias_stmt)
+        terms.extend(
+            MatchTerm(
+                entity_id=row.id,
+                name=row.name,
+                term=row.alias,
+                is_alias=True,
+            )
+            for row in alias_rows
+            if row.alias
+        )
+        return terms
 
     async def find_by_name(self, name: str) -> Entity | None:
-        """Find entity by exact name match."""
-        stmt = self._campaign_scope(select(Entity).where(Entity.name == name))
-        result = await self.session.execute(stmt)
-        return cast(Entity | None, result.scalar_one_or_none())
+        stmt = self._active_scope(select(Entity).where(Entity.name == name))
+        result = await self.session.execute(self._campaign_scope(stmt))
+        return result.scalar_one_or_none()
 
     async def find_by_alias(self, alias: str) -> Entity | None:
         """Find entity by alias."""
-        stmt = self._campaign_scope(
+        alias_ = aliased(EntityAlias)
+        stmt = (
             select(Entity)
-            .join(EntityAlias, Entity.id == EntityAlias.entity_id)
-            .where(EntityAlias.alias == alias)
+            .join(alias_, alias_.entity_id == Entity.id)
+            .where(alias_.alias == alias, alias_.deleted_at.is_(None))
+        )
+        result = await self.session.execute(
+            self._campaign_scope(self._active_scope(stmt))
+        )
+        return result.scalar_one_or_none()
+
+    async def get_with(
+        self, id: UUID, *relationship_names: str
+    ) -> Entity | None:
+        """Get a non-deleted entity with the named relationships loaded.
+
+        The entity must be fetched before its specialization anyway, because
+        campaign scope and type both live on the entity, so loading the
+        relationship here costs one extra statement rather than a second round
+        trip. See ADR-021.
+        """
+        stmt = self._active_scope(select(Entity).where(Entity.id == id))
+        stmt = self._campaign_scope(stmt).options(
+            *[selectinload(getattr(Entity, name)) for name in relationship_names]
         )
         result = await self.session.execute(stmt)
-        return cast(Entity | None, result.scalar_one_or_none())
+        return result.scalar_one_or_none()
+
+    async def soft_delete_with_specializations(self, id: UUID) -> bool:
+        """Soft delete an entity together with its specialization.
+
+        Both rows are stamped in one transaction. Leaving a live specialization
+        behind is unreachable through the API, because every specialized read
+        resolves the entity first, but it is still inconsistent state.
+        """
+        entity = await self.get_with(id, *SPECIALIZATION_RELATIONSHIPS)
+        if entity is None:
+            return False
+        now = datetime.now(UTC)
+        entity.deleted_at = now
+        for relationship_name in SPECIALIZATION_RELATIONSHIPS:
+            specialized = cast(Any, getattr(entity, relationship_name))
+            if specialized is not None:
+                specialized.deleted_at = now
+        await self.session.flush()
+        return True
+
+    async def list_filtered_with(
+        self,
+        *,
+        relationship_names: tuple[str, ...] = (),
+        entity_type: str | None = None,
+        name_contains: str | None = None,
+        base_stmt: Select[Any] | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> list[Entity]:
+        """List entities with the named relationships eagerly loaded.
+
+        ``selectinload`` collects the primary keys of the whole page and issues
+        a single ``IN`` query, so a page of entities costs one extra statement
+        rather than one per row.
+
+        ``base_stmt`` lets a caller add its own predicates, such as requiring a
+        child row to exist, and still page over the result. Paging is applied
+        after those predicates so a page is never short.
+        """
+        # An explicit None check: SQLAlchemy clauses raise on __bool__, so
+        # `base_stmt or ...` would raise TypeError for every real statement.
+        if base_stmt is not None:
+            stmt = base_stmt
+        else:
+            stmt = self._filtered(entity_type, name_contains)
+        stmt = stmt.order_by(Entity.created_at.desc())
+        if relationship_names:
+            stmt = stmt.options(
+                *[
+                    selectinload(getattr(Entity, name))
+                    for name in relationship_names
+                ]
+            )
+        stmt = stmt.offset(offset).limit(limit)
+        result = await self.session.execute(stmt)
+        return cast(list[Entity], list(result.scalars().all()))
 
 
 class EntityAliasRepository(BaseRepository[EntityAlias]):
-    """Repository for EntityAlias operations."""
+    """Repository for EntityAlias operations.
+
+    Aliases are not directly campaign-scoped (they inherit isolation through
+    their parent entity), so callers must verify the parent entity belongs to
+    the caller's campaign before using an alias.
+    """
 
     @property
     def model(self) -> type[EntityAlias]:
         return EntityAlias
 
+    async def get(self, id: UUID) -> EntityAlias | None:
+        """Get a non-deleted alias by ID."""
+        stmt = self._active_scope(select(EntityAlias).where(EntityAlias.id == id))
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def get_by_entity(self, entity_id: UUID) -> list[EntityAlias]:
-        """Get all aliases for an entity."""
-        stmt = select(EntityAlias).where(EntityAlias.entity_id == entity_id)
+        """Get all active aliases for an entity."""
+        stmt = self._active_scope(
+            select(EntityAlias).where(EntityAlias.entity_id == entity_id)
+        )
+        result = await self.session.execute(stmt.order_by(EntityAlias.alias))
+        return cast(list[EntityAlias], list(result.scalars().all()))
+
+    async def get_by_alias(self, entity_id: UUID, alias: str) -> EntityAlias | None:
+        """Get alias by entity_id and alias string."""
+        stmt = self._active_scope(
+            select(EntityAlias).where(
+                EntityAlias.entity_id == entity_id,
+                EntityAlias.alias == alias,
+            )
+        )
         result = await self.session.execute(stmt)
-        return cast(list[EntityAlias], result.scalars().all())
-
-
-class ActorRepository(BaseRepository[Actor]):
-    """Repository for Actor operations."""
-
-    @property
-    def model(self) -> type[Actor]:
-        return Actor
-
-
-class PlayerRepository(BaseRepository[Player]):
-    """Repository for Player operations."""
-
-    @property
-    def model(self) -> type[Player]:
-        return Player
-
-    async def get_by_user(self, user_id: UUID) -> list[Player]:
-        """Get players linked to a user."""
-        stmt = select(Player).where(Player.user_id == user_id)
-        result = await self.session.execute(stmt)
-        return cast(list[Player], result.scalars().all())
-
-
-class PlayerCharacterRepository(BaseRepository[PlayerCharacter]):
-    """Repository for PlayerCharacter operations."""
-
-    @property
-    def model(self) -> type[PlayerCharacter]:
-        return PlayerCharacter
-
-    async def get_by_player(self, player_id: UUID) -> list[PlayerCharacter]:
-        """Get characters for a player."""
-        stmt = select(PlayerCharacter).where(PlayerCharacter.player_id == player_id)
-        result = await self.session.execute(stmt)
-        return cast(list[PlayerCharacter], result.scalars().all())
-
-
-class LocationRepository(BaseRepository[Location]):
-    """Repository for Location operations."""
-
-    @property
-    def model(self) -> type[Location]:
-        return Location
-
-
-class ItemRepository(BaseRepository[Item]):
-    """Repository for Item operations."""
-
-    @property
-    def model(self) -> type[Item]:
-        return Item
-
-
-class FactionRepository(BaseRepository[Faction]):
-    """Repository for Faction operations."""
-
-    @property
-    def model(self) -> type[Faction]:
-        return Faction
+        return result.scalar_one_or_none()

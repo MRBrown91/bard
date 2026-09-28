@@ -1,12 +1,26 @@
 """Core entity identity models."""
 
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import ForeignKey, Index, String, Text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+
+if TYPE_CHECKING:
+    # Imported for type checking only. At runtime the relationships reference
+    # these by class name, which SQLAlchemy resolves against the declarative
+    # registry, so this module never imports entity_types and there is no cycle.
+    from app.models.entity.entity_types import (
+        Actor,
+        Faction,
+        Item,
+        Location,
+        Player,
+        PlayerCharacter,
+    )
 
 
 class Entity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -20,6 +34,79 @@ class Entity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+
+    # One-to-one specializations. Each is keyed on entity_id, which is both the
+    # primary key and the foreign key, so the join is unique. uselist=False is
+    # required: without it SQLAlchemy infers a collection. The deleted_at test
+    # in primaryjoin is what stops a soft-deleted specialization loading as
+    # though it were live.
+    #
+    # lazy="raise_on_sql" turns the async footgun into an immediate error: the
+    # attribute is only readable when a repository explicitly asked for it with
+    # selectinload. viewonly because writes go through the specialized
+    # repositories, so no backref synchronization is wanted.
+    actor: Mapped["Actor | None"] = relationship(
+        "Actor",
+        uselist=False,
+        viewonly=True,
+        lazy="raise_on_sql",
+        primaryjoin="and_(Entity.id == Actor.entity_id, Actor.deleted_at.is_(None))",
+    )
+    player: Mapped["Player | None"] = relationship(
+        "Player",
+        uselist=False,
+        viewonly=True,
+        lazy="raise_on_sql",
+        primaryjoin="and_(Entity.id == Player.entity_id, Player.deleted_at.is_(None))",
+    )
+    player_character: Mapped["PlayerCharacter | None"] = relationship(
+        "PlayerCharacter",
+        uselist=False,
+        viewonly=True,
+        lazy="raise_on_sql",
+        primaryjoin=(
+            "and_(Entity.id == PlayerCharacter.entity_id, "
+            "PlayerCharacter.deleted_at.is_(None))"
+        ),
+    )
+    location: Mapped["Location | None"] = relationship(
+        "Location",
+        uselist=False,
+        viewonly=True,
+        lazy="raise_on_sql",
+        primaryjoin=(
+            "and_(Entity.id == Location.entity_id, "
+            "Location.deleted_at.is_(None))"
+        ),
+    )
+    item: Mapped["Item | None"] = relationship(
+        "Item",
+        uselist=False,
+        viewonly=True,
+        lazy="raise_on_sql",
+        primaryjoin="and_(Entity.id == Item.entity_id, Item.deleted_at.is_(None))",
+    )
+    faction: Mapped["Faction | None"] = relationship(
+        "Faction",
+        uselist=False,
+        viewonly=True,
+        lazy="raise_on_sql",
+        primaryjoin=(
+            "and_(Entity.id == Faction.entity_id, Faction.deleted_at.is_(None))"
+        ),
+    )
+
+    # Aliases. Ordering matches the explicit query so both read paths agree.
+    aliases: Mapped[list["EntityAlias"]] = relationship(
+        "EntityAlias",
+        viewonly=True,
+        lazy="raise_on_sql",
+        order_by="EntityAlias.alias",
+        primaryjoin=(
+            "and_(Entity.id == EntityAlias.entity_id, "
+            "EntityAlias.deleted_at.is_(None))"
+        ),
+    )
 
     __table_args__ = (
         Index("ix_entities_campaign_id", "campaign_id"),
