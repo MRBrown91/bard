@@ -202,6 +202,28 @@ No foreign key uses `ON DELETE CASCADE`. Soft deletion is application-level
 and stamps `deleted_at` on the parent and its specialization in one
 transaction, preserving history for retcons (ADR-010).
 
+### One row per flush
+
+The unit of work orders a flush by `relationship()` declarations, not by
+foreign key columns. This schema expresses ownership as foreign key columns
+without ORM relationships, so an `entities` row and its `campaigns` parent
+have no dependency edge and can be emitted in either order. Adding both to one
+session and committing once produces `IntegrityError` on the child's foreign
+key, because the parent has not been written.
+
+This is documented SQLAlchemy behaviour, not a defect, and the models are
+deliberately built this way (ADR-021, ADR-023). Every write path therefore
+flushes one row at a time. There are three: `BaseRepository.create`,
+`SpecializedRepository.create`, and `resolve_current_user`, each of which adds
+and flushes immediately. A write that needs several rows must flush the parent
+explicitly in between. `tests/repositories/test_one_row_per_flush.py` guards
+this.
+
+This matters for DELETE as well as INSERT. Bulk cleanup has to remove children
+before parents regardless of ORM ordering, which is what makes
+`soft_delete_with_statements` stamp the parent and its children in one flush
+rather than issuing separate deletes.
+
 ## Document
 
 ```text

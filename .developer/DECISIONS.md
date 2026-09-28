@@ -523,3 +523,129 @@ filter in the base class is the only way to make the documented guarantee
 hold for tables that do not exist yet.
 
 **Status:** Approved — implement before Phase 1C.1.
+
+## ADR-023: One row per flush, because the ORM orders by relationship not foreign key
+
+**Context:** A probe that added a `Campaign` and an `Entity` to the same
+session and committed once failed:
+
+```text
+insert or update on table "entities" violates foreign key constraint
+"entities_campaign_id_fkey"
+```
+
+The echo log showed a single statement, `INSERT INTO entities`, then
+`ROLLBACK`. The campaign was never written, so the child could not resolve it.
+This looked like a unit-of-work ordering defect and was carried as an open bug
+until it was isolated.
+
+It is not one. Three findings:
+
+- A bare three-table model (users -> campaigns -> entities) with matching
+  foreign key values, no application code, no event listeners, and a plain
+  sync engine fails identically. A sync engine rules out asyncio, psycopg, and
+  the session configuration.
+- `sort_tables()` returns the correct order (`users`, `campaigns`, `entities`),
+  so the metadata is right. The unit of work does not consult it.
+- The SQLAlchemy maintainer, on the equivalent upstream report, states that
+  "the ORM orders objects in terms of their dependencies using relationship
+  exclusively. ForeignKey is not considered," and closed it as not a bug.
+
+That is the whole explanation. Insert order is derived from the mapper
+dependency graph, which is built from `relationship()` declarations, not from
+foreign key columns. `sort_tables()` sorts by foreign key, but nothing in the
+flush path calls it that way.
+
+This codebase expresses ownership as foreign key columns. `Entity.campaign_id`
+references `campaigns.id` with no `relationship()`, which is the deliberate
+consequence of ADR-016 and ADR-021: navigation and isolation go through
+campaign-scoped repositories instead of ORM object graphs. So that hop has no
+dependency edge, and an `Entity` is free to be inserted before its campaign.
+
+**Decision:** The invariant is one row per flush. There are three write paths
+in the codebase that persist a new row — `BaseRepository.create`,
+`SpecializedRepository.create`, and `resolve_current_user` — and all three
+already add and then flush immediately. No code changes are needed. What is
+added is a guard, because the failure mode is invisible until it is a live
+`IntegrityError`.
+
+`tests/repositories/test_one_row_per_flush.py` walks the application package
+and asserts that no function accumulates two pending `session.add()` calls
+without an intervening `flush()`. It matches on the receiver containing
+`session` so a `set.add()` is not mistaken for one, asserts it found a
+plausible number of writes so it cannot pass by matching nothing, and carries
+its own cases proving it rejects a batched parent and child. This is the same
+structural approach as `test_no_undeleted_reads.py`, for the same reason:
+SQLAlchemy offers no hook to enforce either rule, and both rules are silently
+violable otherwise.
+
+**Consequences:**
+- A future endpoint that creates a graph in one request must flush the parent
+  explicitly, and the structural test will say so at review time rather than
+  letting it fail against production-shaped data.
+- The stricter alternative, adding `relationship()` declarations for the
+  ownership chain purely to give the flush an order, was rejected. It would
+  reintroduce the ORM object graph that ADR-021 removed, and it would only fix
+  ordering, not scoping, which is enforced in the repositories anyway.
+- The constraint is invisible in the model definitions. A reader of
+  `app/models/entity/entity.py` cannot tell that the missing relationship has a
+  persistence consequence, so the note also lives in DATABASE.md.
+
+**Reason:** This is documented upstream behaviour interacting with a deliberate
+architectural choice, not a defect to repair. Repairing it in code would mean
+adding machinery that solves a problem the codebase does not currently have,
+while leaving the real invariant undocumented.
+
+**Status:** Approved — documentation and guard only, no behaviour change.
+
+## ADR-024: WebSocket identity binding is deferred to the end of Phase 1
+
+**Context:** `app/api/websocket/routes/stream.py` validates the token, binds the
+result to a local, and never reads it again:
+
+```python
+identity = await provider.validate_token(token)   # line 21
+```
+
+`identity` is never referenced. The socket accepts any token the provider
+considers valid, knows nothing about which campaign or user the connection
+represents, and cannot apply campaign scope or visibility to anything. ADR-014
+already made the query-string token a temporary Phase 1 measure and ADR-019
+separated the transport from realtime behaviour, but neither addresses the
+discarded identity.
+
+Nothing is persisted over this socket in Phase 1. The handler reads a
+`transcript` field and echoes it back with an empty `matches` list, so there is
+no data to scope and no context to filter. There is consequently no
+authorization decision being made wrongly today.
+
+**Decision:** Do not resolve this before P1D.1. Resolve it at the end of Phase
+1, as an explicit step, and record the gap here so it is tracked rather than
+inherited silently.
+
+This is recorded now because the failure mode is misleading. A reader sees a
+validated token and a successful accept, which reads as authenticated. The
+connection is in fact unauthenticated in the only sense that matters: there is
+no identity to enforce anything with. That is survivable while nothing is
+written, and dangerous the moment something is, because the code will still
+look correct.
+
+The end of Phase 1 is the right time rather than merely a convenient one. The
+fix needs a decision this phase has not made: what a stream connection is bound
+to, and for how long. That depends on the Phase 2 token and streaming model, and
+binding the identity earlier would mean guessing and then rewriting.
+
+**Consequences:**
+- The socket is not a security boundary in Phase 1 and must not become one
+  without this step. Any transcript handling that persists, caches, or enriches
+  needs the identity first.
+- The lint finding that flags the unused binding stays. Fixing it by deleting
+  the call would remove the token check and turn an authentication gap into an
+  unauthenticated endpoint, which is strictly worse than the current state.
+
+**Reason:** Deferring is correct because nothing is at stake yet, but the
+deferral has to be visible. A gap that only exists in a local variable is a gap
+nobody is tracking.
+
+**Status:** Approved — defer to the end of Phase 1; do not expand WebSocket
+scope before then.
