@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
 
 from sqlalchemy import Select, func, select
@@ -11,6 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import DeclarativeBase
+
+# Preserves the row type of a select across the scope helpers, so wrapping a
+# query does not erase the inference AsyncSession.execute() would otherwise
+# give the caller and force a cast at every hand-written query.
+_SelectT = TypeVar("_SelectT", bound=Select[Any])
+
 
 class BaseRepository[T: DeclarativeBase](ABC):
     """Base repository with automatic campaign isolation."""
@@ -25,13 +31,18 @@ class BaseRepository[T: DeclarativeBase](ABC):
         """Return the SQLAlchemy model class."""
         ...
 
-    def _campaign_scope(self, stmt: Select[Any]) -> Select[Any]:
-        """Apply campaign_id filter to query."""
+    def _campaign_scope(self, stmt: _SelectT) -> _SelectT:
+        """Apply campaign_id filter to query.
+
+        A silent no-op for models without a ``campaign_id`` column, which is how
+        the child tables inherit isolation through a parent. Those repositories
+        have to establish the campaign by joining the parent themselves.
+        """
         if self.campaign_id is not None and hasattr(self.model, "campaign_id"):
             return stmt.where(self.model.campaign_id == self.campaign_id)  # type: ignore[attr-defined]
         return stmt
 
-    def _active_scope(self, stmt: Select[Any]) -> Select[Any]:
+    def _active_scope(self, stmt: _SelectT) -> _SelectT:
         """Exclude soft-deleted rows.
 
         Every table inherits ``deleted_at`` from ``TimestampMixin``, so this
@@ -39,6 +50,10 @@ class BaseRepository[T: DeclarativeBase](ABC):
         (ADR-010); it must not make them visible to ordinary reads, or a
         "deleted" campaign would still be fully usable and a deleted document
         would still be returned by the API that promised to remove it.
+
+        Hand-written queries in the subclasses have to call this too. It is not
+        applied automatically, because SQLAlchemy has no hook for it and a
+        query built from scratch does not pass through ``get``/``list``.
         """
         return stmt.where(self.model.deleted_at.is_(None))  # type: ignore[attr-defined]
 
@@ -47,7 +62,7 @@ class BaseRepository[T: DeclarativeBase](ABC):
         stmt = self._active_scope(select(self.model).where(self.model.id == id))  # type: ignore[attr-defined]
         stmt = self._campaign_scope(stmt)
         result = await self.session.execute(stmt)
-        return cast(T | None, result.scalar_one_or_none())
+        return result.scalar_one_or_none()
 
     async def list(
         self,
@@ -62,14 +77,14 @@ class BaseRepository[T: DeclarativeBase](ABC):
         if order_by and hasattr(self.model, order_by):
             stmt = stmt.order_by(getattr(self.model, order_by))
         result = await self.session.execute(stmt)
-        return cast(Sequence[T], result.scalars().all())
+        return result.scalars().all()
 
     async def count(self) -> int:
         """Count active rows with campaign scope."""
         stmt = self._active_scope(select(func.count()).select_from(self.model))
         stmt = self._campaign_scope(stmt)
         result = await self.session.execute(stmt)
-        return cast(int, result.scalar_one())
+        return result.scalar_one()
 
     async def create(self, **kwargs: Any) -> T:
         """Create new record, defaulting campaign_id from the scope.

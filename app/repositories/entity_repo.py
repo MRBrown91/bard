@@ -43,7 +43,7 @@ class EntityRepository(BaseRepository[Entity]):
         stmt = self._active_scope(select(Entity).where(Entity.id == id))
         stmt = self._campaign_scope(stmt)
         result = await self.session.execute(stmt)
-        return cast(Entity | None, result.scalar_one_or_none())
+        return result.scalar_one_or_none()
 
     def filtered_stmt(
         self, entity_type: str | None, name_contains: str | None
@@ -105,7 +105,7 @@ class EntityRepository(BaseRepository[Entity]):
         """Find entity by exact name match."""
         stmt = self._active_scope(select(Entity).where(Entity.name == name))
         result = await self.session.execute(self._campaign_scope(stmt))
-        return cast(Entity | None, result.scalar_one_or_none())
+        return result.scalar_one_or_none()
 
     async def find_by_alias(self, alias: str) -> Entity | None:
         """Find entity by alias."""
@@ -118,7 +118,7 @@ class EntityRepository(BaseRepository[Entity]):
         result = await self.session.execute(
             self._campaign_scope(self._active_scope(stmt))
         )
-        return cast(Entity | None, result.scalar_one_or_none())
+        return result.scalar_one_or_none()
 
     async def get_with(
         self, id: UUID, *relationship_names: str
@@ -135,7 +135,7 @@ class EntityRepository(BaseRepository[Entity]):
             *[selectinload(getattr(Entity, name)) for name in relationship_names]
         )
         result = await self.session.execute(stmt)
-        return cast(Entity | None, result.scalar_one_or_none())
+        return result.scalar_one_or_none()
 
     async def soft_delete_with_specializations(self, id: UUID) -> bool:
         """Soft delete an entity together with its specialization.
@@ -211,7 +211,7 @@ class EntityAliasRepository(BaseRepository[EntityAlias]):
         """Get a non-deleted alias by ID."""
         stmt = self._active_scope(select(EntityAlias).where(EntityAlias.id == id))
         result = await self.session.execute(stmt)
-        return cast(EntityAlias | None, result.scalar_one_or_none())
+        return result.scalar_one_or_none()
 
     async def get_by_entity(self, entity_id: UUID) -> list[EntityAlias]:
         """Get all active aliases for an entity."""
@@ -230,4 +230,4 @@ class EntityAliasRepository(BaseRepository[EntityAlias]):
             )
         )
         result = await self.session.execute(stmt)
-        return cast(EntityAlias | None, result.scalar_one_or_none())
+        return result.scalar_one_or_none()

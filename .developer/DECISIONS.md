@@ -475,9 +475,27 @@ they answer different questions and only one of them is optional. `_campaign_sco
 is a silent no-op when a model has no `campaign_id` column, which is how
 `document_statements` and `entity_aliases` inherit isolation through a parent.
 Those tables are therefore protected by the deletion filter alone, and the
-tests assert both properties for exactly those repositories. A repository that
-scopes through a parent join (see ADR-021) must still filter the parent, and
-that remains a per-repository responsibility.
+tests assert both properties for exactly those repositories.
+
+Moving the filter to the base class is necessary but not sufficient. A
+subclass that writes its own `select()` never passes through `get`/`list`, so
+the filter has to be repeated at every hand-written query — and it was missing
+from 36 of them. `UserRepository.get_by_auth` was one, which is the
+authentication path: a soft-deleted account could still sign in. SQLAlchemy
+offers no hook to apply a predicate automatically, so this cannot be made
+structural at the framework level.
+
+`tests/repositories/test_no_undeleted_reads.py` therefore asserts the property
+by walking the repository package and checking that every public method which
+builds its own `select()` filters `deleted_at`, directly or by delegating to a
+helper that does. A new read method cannot be added without deciding whether it
+filters, and the walk asserts it found a plausible number of methods so it
+cannot pass by matching nothing.
+
+Both scope helpers are generic in the select type so wrapping a query does not
+erase the row-type inference `AsyncSession.execute()` would otherwise give the
+caller. Without that, every wrapped query needed a `cast` at the return
+statement, which is the noise that made these methods look unwritten.
 
 `soft_delete` and `update` inherit the behaviour through `get`: deleting or
 editing an already-deleted row reports failure instead of re-stamping
