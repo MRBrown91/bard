@@ -5,6 +5,7 @@ behaviour without needing a database.
 """
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
@@ -18,6 +19,7 @@ from app.repositories.entity_repo import (
     SPECIALIZATION_RELATIONSHIPS,
     EntityAliasRepository,
     EntityRepository,
+    MatchTerm,
     escape_like,
 )
 from app.schemas.entity import EntityType
@@ -416,3 +418,148 @@ class TestSoftDeleteWithSpecializations:
         }
         for name in SPECIALIZATION_RELATIONSHIPS:
             assert hasattr(Entity, name)
+
+
+class TestListMatchTerms:
+    """The vocabulary query behind the entity matcher.
+
+    Compiled and inspected, so these assert the query shape rather than the
+    rows: what matters is that the campaign scope reaches the entity table, that
+    a soft-deleted alias is excluded in the join, and that an entity with no
+    alias still produces a row.
+    """
+
+    def session_for(
+        self, name_rows: list[object], alias_rows: list[object] | None = None
+    ) -> AsyncMock:
+        """Build a session returning the name rows, then the alias rows."""
+        session = AsyncMock(spec=AsyncSession)
+        results = [self.result_with(name_rows)]
+        if alias_rows is not None:
+            results.append(self.result_with(alias_rows))
+        session.execute.side_effect = results
+        return session
+
+    def result_with(self, rows: list[object]) -> MagicMock:
+        """Build a result whose iterated rows are these tuples."""
+        result = MagicMock()
+        result.__iter__.return_value = iter(rows)
+        return result
+
+    def statements(self, session: AsyncMock) -> list[str]:
+        """Return the SQL of each executed statement, in order."""
+        return [
+            str(cast(Select[Any], call[0][0]).compile())
+            for call in session.execute.await_args_list
+        ]
+
+    @pytest.mark.asyncio
+    async def test_scopes_both_queries_to_the_campaign(self) -> None:
+        """The alias side carries no campaign column, so it inherits the scope
+        only by joining the entity. Both statements need the predicate."""
+        session = self.session_for([], [])
+        await EntityRepository(session, uuid4()).list_match_terms()
+        for text in self.statements(session):
+            assert "entities.campaign_id = " in text
+
+    @pytest.mark.asyncio
+    async def test_omits_scope_without_a_campaign(self) -> None:
+        session = self.session_for([], [])
+        await EntityRepository(session, None).list_match_terms()
+        for text in self.statements(session):
+            assert "entities.campaign_id = " not in text
+
+    @pytest.mark.asyncio
+    async def test_excludes_soft_deleted_rows(self) -> None:
+        session = self.session_for([], [])
+        await EntityRepository(session, uuid4()).list_match_terms()
+        assert "entities.deleted_at IS NULL" in self.statements(session)[0]
+        assert "entity_aliases.deleted_at IS NULL" in self.statements(session)[1]
+
+    @pytest.mark.asyncio
+    async def test_joins_aliases_to_their_entity(self) -> None:
+        session = self.session_for([], [])
+        await EntityRepository(session, uuid4()).list_match_terms()
+        alias_sql = self.statements(session)[1]
+        assert "JOIN entity_aliases" in alias_sql
+        assert "entity_aliases.entity_id = entities.id" in alias_sql
+
+    @pytest.mark.asyncio
+    async def test_selects_only_the_columns_the_matcher_reads(self) -> None:
+        session = self.session_for([], [])
+        await EntityRepository(session, uuid4()).list_match_terms()
+        for text in self.statements(session):
+            # A description or a timestamp would make every transcript message
+            # pay for columns the matcher never compares.
+            assert "entities.description" not in text
+            assert "entities.created_at" not in text
+
+    @pytest.mark.asyncio
+    async def test_an_entity_always_contributes_its_own_name(self) -> None:
+        """The regression this query shape exists for.
+
+        A single outer join returns one row per (entity, alias) pair, so an
+        entity *with* an alias yielded only the alias and became unmatchable by
+        its real name. The more aliases an entity had, the less findable it
+        became.
+        """
+        entity_id = uuid4()
+        session = self.session_for(
+            [SimpleNamespace(id=entity_id, name="Sela")],
+            [SimpleNamespace(id=entity_id, name="Sela", alias="The Viper")],
+        )
+
+        terms = await EntityRepository(session, uuid4()).list_match_terms()
+
+        assert terms == [
+            MatchTerm(
+                entity_id=entity_id, name="Sela", term="Sela", is_alias=False
+            ),
+            MatchTerm(
+                entity_id=entity_id,
+                name="Sela",
+                term="The Viper",
+                is_alias=True,
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_entity_with_no_alias_still_contributes_its_name(self) -> None:
+        entity_id = uuid4()
+        session = self.session_for([SimpleNamespace(id=entity_id, name="Bram")], [])
+
+        terms = await EntityRepository(session, uuid4()).list_match_terms()
+
+        assert terms == [
+            MatchTerm(
+                entity_id=entity_id, name="Bram", term="Bram", is_alias=False
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_reports_every_alias_of_an_entity(self) -> None:
+        entity_id = uuid4()
+        session = self.session_for(
+            [SimpleNamespace(id=entity_id, name="Sela")],
+            [
+                SimpleNamespace(id=entity_id, name="Sela", alias="The Viper"),
+                SimpleNamespace(id=entity_id, name="Sela", alias="Serpent"),
+            ],
+        )
+
+        terms = await EntityRepository(session, uuid4()).list_match_terms()
+
+        assert [t.term for t in terms] == ["Sela", "The Viper", "Serpent"]
+        assert [t.is_alias for t in terms] == [False, True, True]
+
+    @pytest.mark.asyncio
+    async def test_an_alias_row_with_no_value_is_skipped(self) -> None:
+        """Defensive: an empty alias must not become a matchable term."""
+        session = self.session_for(
+            [SimpleNamespace(id=uuid4(), name="Sela")],
+            [SimpleNamespace(id=uuid4(), name="Sela", alias="")],
+        )
+
+        terms = await EntityRepository(session, uuid4()).list_match_terms()
+
+        assert [t.is_alias for t in terms] == [False]

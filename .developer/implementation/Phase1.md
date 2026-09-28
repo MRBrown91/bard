@@ -461,7 +461,7 @@ movement; campaign scoping of the audience tables through the parent fact.
 
 ### P1E.1 — Entity Matcher Implementation
 
-**Status:** `Planning`
+**Status:** `Complete`
 
 **Goal:** Implement `EntityMatcher.find_candidates(text)` with deterministic pipeline.
 
@@ -484,18 +484,51 @@ movement; campaign scoping of the audience tables through the parent fact.
 - Case-insensitive alias: 0.85
 - Fuzzy: 0.7 - 0.8 based on distance
 
-**Repository Dependency:** `EntityRepository` for fetching campaign entities/aliases.
+**Repository Dependency:** `EntityRepository.list_match_terms()` returns one term per name and one per alias, as plain values rather than `Entity` rows. The matcher compares strings and ids, so loading descriptions, timestamps, and specializations on every transcript message would be cost for columns it never reads.
 
-**Tests:**
-- Unit: each pipeline step in isolation
-- Integration: full pipeline with test campaign data
-- Edge cases: overlapping matches, substring issues, Unicode
+That method runs **two** scoped projections, not one outer join. A join returns one row per (entity, alias) pair, so an entity *with* an alias contributes only the alias and never its own name — the more aliases an entity had, the less findable it became. This was built, verified wrong against real data, and fixed; the regression test is `test_an_entity_always_contributes_its_own_name`.
+
+**Decisions taken here:**
+
+- **Candidates come from tokens, not from substring search.** The text is
+  tokenized and every run of 1..N tokens is looked up in the vocabulary. That
+  is what stops a name from matching inside a longer word: "Ann" is never a
+  candidate inside "Anne". The cost is that both sides normalize the same way,
+  which is why a name with punctuation ("O'Brien") still matches itself.
+- **Fuzzy has a length floor, applied to the *stored term* and not just the
+  word in the text.** Checking only the text would still let a three-letter
+  name sit within distance 1 of any four-letter word, so "Anne" would match a
+  character named "Ann". Two short names also sit within distance 2 of each
+  other, which is what the floor exists to prevent.
+- **One candidate per entity.** A name mentioned three times in a transcript is
+  one thing the text is about. The strongest tier wins, and a tie on confidence
+  keeps the earlier mention, so `matched_text` is the first place the name was
+  used.
+- **A name beats an alias at the same tier or distance.** The name is the
+  entity's primary identifier. Within the winning tier every entity survives, so
+  two entities sharing a name both come back — nothing in the schema forbids
+  it, and reporting one of them would silently drop a real entity.
+- **Longest match wins, and a match consumes its tokens.** "Old Man" is not
+  also reported as "Old" followed by "Man".
+- **No new dependency.** Levenshtein is a short two-row DP with an early exit,
+  rather than a package, for one bounded comparison.
+- **No `EntityRecognitionService`.** It would hold no state and forward one
+  call. Same reasoning as dropping `FactService` for P1D.1.
+
+**Tests:** 56 pipeline unit tests (each tier in isolation, plus no-substring,
+overlap, phrase, Unicode, blank-term, and determinism cases) and 17 matcher
+tests (per-entity collapse, shared names, settings, empty input).
+
+**Edge case the unit tests could not have caught:** the vocabulary query was
+correct against mocked rows and wrong against the database. Mocking the
+repository bypassed the row-to-term mapping entirely, so the join's real shape
+was never exercised until a live probe with an entity that had an alias.
 
 ---
 
 ### P1E.2 — Entity Recognition API
 
-**Status:** `Planning`
+**Status:** `Complete`
 
 **Goal:** Expose entity matching as a service endpoint.
 
@@ -504,13 +537,33 @@ movement; campaign scoping of the audience tables through the parent fact.
 |--------|------|-------------|
 | POST | `/api/campaigns/{campaign_id}/entity-recognition` | Input: `{text: string}` → Output: `{candidates: EntityCandidate[]}` |
 
-**Service:** `EntityRecognitionService` (wraps `EntityMatcher`)
+**Files:**
+- `app/schemas/recognition.py` — request, candidate, and response models
+- `app/api/http/routes/entity_recognition.py` — the endpoint
+- `app/main.py` — router registration
 
-**Schemas:** `EntityRecognitionRequest`, `EntityRecognitionResponse`, `EntityCandidateSchema`
+**No service layer.** The route builds a campaign-scoped `EntityRepository` and
+calls `EntityMatcher` directly. An `EntityRecognitionService` would hold no
+state and forward exactly one call.
 
-**Authorization:** Campaign owner (or member in future).
+**Request rules:** `text` is stripped and must be non-empty, `max_length=10000`,
+`extra="forbid"`. A blank transcript is a client mistake worth a 422, not an
+empty result set that hides it.
 
-**Tests:** API contract; pipeline integration; empty/no-match responses.
+**Authorization:** Campaign owner, via the shared `require_campaign_access`
+dependency. Any authenticated owner may recognize text; no ownership filter is
+applied, because the vocabulary is built from every entity in the campaign.
+
+**Tests:** 12 API tests covering response shape, confidence ordering,
+validation (blank text, too long, unknown field), the repository being
+constructed with the request's campaign id, and byte-identical output across
+repeated calls.
+
+**Verified against a live database,** not only against mocked repositories. The
+probe covered each confidence tier, a fuzzy typo, multiple mentions of one name,
+a transcript matching nothing, and cleanup of its own rows. That probe is what
+found the vocabulary defect described in P1E.1 — mocked repository tests could
+not have caught it.
 
 ---
 

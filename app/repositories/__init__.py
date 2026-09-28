@@ -14,7 +14,11 @@ from app.repositories.document_repo import (
     DocumentRepository,
     DocumentStatementRepository,
 )
-from app.repositories.entity_repo import EntityAliasRepository, EntityRepository
+from app.repositories.entity_repo import (
+    EntityAliasRepository,
+    EntityRepository,
+    MatchTerm,
+)
 from app.repositories.event_repo import EventRepository
 from app.repositories.fact_repo import FactRepository, RelationshipFactRepository
 from app.repositories.relationship_repo import RelationshipRepository
@@ -36,6 +40,7 @@ __all__ = [
     "CampaignMemberRepository",
     "SessionRepository",
     "EntityRepository",
+    "MatchTerm",
     "EntityAliasRepository",
     "SpecializedRepository",
     "ActorRepository",

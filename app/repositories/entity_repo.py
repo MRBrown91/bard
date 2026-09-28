@@ -1,10 +1,11 @@
 """Entity repository with alias support."""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.orm import aliased, selectinload
 
 from app.models import Entity, EntityAlias
@@ -25,6 +26,23 @@ def escape_like(term: str) -> str:
     for char in ("\\", "%", "_"):
         term = term.replace(char, LIKE_ESCAPE + char)
     return term
+
+
+@dataclass(frozen=True, slots=True)
+class MatchTerm:
+    """One string the entity matcher can recognize, and what it belongs to.
+
+    ``term`` is the name or the alias; ``name`` is always the entity's own
+    name, so a caller can label a result without a second lookup. Keeping the
+    pair here is what lets the matcher return the right display name for a hit
+    that came from an alias.
+    """
+
+    entity_id: UUID
+    name: str
+    term: str
+    is_alias: bool
+
 
 
 class EntityRepository(BaseRepository[Entity]):
@@ -101,8 +119,58 @@ class EntityRepository(BaseRepository[Entity]):
         result = await self.session.execute(count_stmt)
         return result.scalar_one()
 
+    async def list_match_terms(self) -> list[MatchTerm]:
+        """List every name and alias the matcher can recognize.
+
+        One term per name and one per alias, so an entity contributes its own
+        name whether or not it has aliases. Returns plain values rather than
+        ``Entity`` objects because the matcher compares strings and ids:
+        loading descriptions, timestamps, and the specializations it will never
+        read would make every transcript message pay for a full entity load.
+
+        Two queries rather than one outer join. A join cannot express "the
+        name, and also every alias": it returns one row per (entity, alias)
+        pair, so an entity that *has* an alias would contribute only its alias
+        and never its own name, and the more aliases an entity had the less
+        matchable it would become. Two scoped projections say exactly that.
+        """
+        names_stmt = self._campaign_scope(
+            self._active_scope(cast(Select[Any], select(Entity.id, Entity.name)))
+        )
+        name_rows = await self.session.execute(names_stmt)
+        terms = [
+            MatchTerm(entity_id=row.id, name=row.name, term=row.name, is_alias=False)
+            for row in name_rows
+        ]
+
+        alias_stmt = self._campaign_scope(
+            self._active_scope(
+                cast(
+                    Select[Any],
+                    select(Entity.id, Entity.name, EntityAlias.alias).join(
+                        EntityAlias,
+                        and_(
+                            EntityAlias.entity_id == Entity.id,
+                            EntityAlias.deleted_at.is_(None),
+                        ),
+                    ),
+                )
+            )
+        )
+        alias_rows = await self.session.execute(alias_stmt)
+        terms.extend(
+            MatchTerm(
+                entity_id=row.id,
+                name=row.name,
+                term=row.alias,
+                is_alias=True,
+            )
+            for row in alias_rows
+            if row.alias
+        )
+        return terms
+
     async def find_by_name(self, name: str) -> Entity | None:
-        """Find entity by exact name match."""
         stmt = self._active_scope(select(Entity).where(Entity.name == name))
         result = await self.session.execute(self._campaign_scope(stmt))
         return result.scalar_one_or_none()
