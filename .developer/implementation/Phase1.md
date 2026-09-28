@@ -290,7 +290,7 @@ Two rules earned their tests through live-database failures that the mocked test
 
 ### P1D.1 — Entity Fact CRUD API
 
-**Status:** `Planning`
+**Status:** `Complete`
 
 **Goal:** Manage atomic claims about single entities.
 
@@ -309,13 +309,61 @@ Two rules earned their tests through live-database failures that the mocked test
 | POST | `/api/campaigns/{campaign_id}/entities/{entity_id}/facts/{fact_id}/audiences` | Add audience rule |
 | DELETE | `/api/campaigns/{campaign_id}/entities/{entity_id}/facts/{fact_id}/audiences/{audience_id}` | Remove audience rule |
 
-**Service:** `FactService`
-**Repository:** `FactRepository` (with visibility filter from PrePhase1)
-**Schemas:** `EntityFactCreate`, `EntityFactRead`, `EntityFactUpdate`, `FactAudienceCreate`, `FactAudienceRead`
+**Application:** `app/application/facts/facts.py` — function-level use cases
+(`create_fact`, `get_fact`, `list_facts`, `update_fact`, `delete_fact`,
+`add_audience`, `remove_audience`). No `FactService` class: the operations are
+single-purpose and share no state, so a class would be a namespace with an
+`__init__`. This matches the entity and document phases.
 
-**Validation:** `confidence` 0-1, `importance` >= 0, `status` enum, `fact_type` free text (convention: "physical_trait", "personality", "history", etc.)
+**Repository:** `FactRepository`; audience rules via `FactAudienceRepository`
+and, for P1D.2, `RelationshipFactAudienceRepository`. There is **no** visibility
+filter — see ADR-025. The phase plan previously credited this repository with a
+"visibility filter from PrePhase1" that never existed and that the docstrings
+falsely claimed. Corrected here rather than left as a standing inaccuracy.
 
-**Tests:** Provenance chain (fact → statement → document); visibility filter integration; status transitions.
+**Schemas:** `EntityFactCreate`, `EntityFactRead`, `EntityFactUpdate`,
+`EntityFactList`, `EntityFactWithAudiencesRead`, `FactAudienceCreate`,
+`FactAudienceRead`.
+
+**Validation:** `confidence` 0-1, `importance` >= 0, `status` enum, `fact_type`
+free text (convention: "physical_trait", "personality", "history", etc.). All
+fact and audience schemas forbid extra fields.
+
+**Tests:** Provenance chain (fact → statement → document); the fact belongs to
+the entity named in the path; provenance is immutable; audience pairing; status
+movement; campaign scoping of the audience tables through the parent fact.
+
+**Decisions taken here:**
+
+- **`entity_id` in the path owns the fact.** The item routes resolve the fact
+  within the campaign and then check it belongs to that entity. Without the
+  check, `/entities/A/facts/F` would read, edit, and delete a fact belonging to
+  entity B, which contradicts what the path claims. `remove_alias` in P1B
+  already does this.
+- **Provenance is immutable after creation.** `entity_id`, `fact_type`,
+  `statement_id`, and `event_id` are rejected by `EntityFactUpdate` and are
+  absent from `FactRepository.UPDATABLE_FIELDS`. The schema is the first lock
+  and the repository allow-list the second: a fact's history should not be
+  rewritable by whichever caller reaches the repository. Status, content,
+  confidence, and importance are mutable.
+- **Status moves freely** between `active`, `invalidated`, and `superseded`.
+  P1D.5 owns the meaningful transitions, including setting `superseded_by`.
+  The enum is a regex pattern rather than a `StrEnum` here because ADR-011
+  already accepts Python-side validation, and the plan does not commit to one
+  representation.
+- **`audience_type` and `player_id` are paired** by a schema validator: `player`
+  requires `player_id`, and no other type accepts it. A `player_id` is also
+  resolved through the campaign-scoped `PlayerRepository` on write, so it names
+  a live player rather than any uuid. Without that, a rule could name an entity
+  of another campaign, a deleted player, or an item, and sit in the table
+  looking valid while matching nobody.
+- **The page and the total share one predicate** (`_filtered_stmt`), so the
+  total always equals the rows a client can page through. Ordering is
+  `(created_at, id)`; a tie on the timestamp would otherwise let a row repeat or
+  vanish between pages.
+- **Audiences load as `viewonly` relationships** with `lazy="raise_on_sql"`, so
+  a caller cannot write a rule by appending to a collection. Audience writes go
+  through the audience repository explicitly.
 
 ---
 

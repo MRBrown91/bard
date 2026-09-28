@@ -26,6 +26,7 @@ from app.repositories import (
     EntityAliasRepository,
     EntityRepository,
     EventRepository,
+    FactAudienceRepository,
     FactionRepository,
     FactRepository,
     ItemRepository,
@@ -133,6 +134,13 @@ async def get_fact_repo(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> FactRepository:
     return FactRepository(session, campaign.id)
+
+
+async def get_fact_audience_repo(
+    campaign: Annotated[Campaign, Depends(get_current_campaign)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> FactAudienceRepository:
+    return FactAudienceRepository(session, campaign.id)
 
 
 async def get_relationship_fact_repo(

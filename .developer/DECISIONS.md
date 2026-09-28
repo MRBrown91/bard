@@ -649,3 +649,51 @@ nobody is tracking.
 
 **Status:** Approved — defer to the end of Phase 1; do not expand WebSocket
 scope before then.
+
+## ADR-025: Audience rules are stored in Phase 1 but not enforced until Phase 2
+
+**Context:** `entity_facts` and `entity_relationship_facts` have audience tables
+that record who a fact is meant for (`general`, `dm`, `player` + `player_id`).
+ADR-014 removed the separate visible/secret flag and made visibility a first
+class concept, with the rule that visibility is enforced *before* model context
+is constructed.
+
+P1D.1 originally listed `FactRepository` as carrying "visibility filter from
+PrePhase1". No such filter was ever implemented. An earlier version of
+`app/repositories/fact_repo.py` and `audience_repo.py` nonetheless carried
+docstrings claiming that audience rules were honoured on reads, which was false
+documentation of a feature that did not exist. The docstrings have been
+corrected and the claim removed.
+
+Nothing is lost by deferring. Phase 1 has no DM view and no per-player
+perspective: every read goes to the campaign owner, who is authorized for every
+row by definition. A filter applied to owner-only reads would be dead code whose
+only observable behaviour is to hide rows from the one person allowed to see
+them.
+
+**Decision:** Store audience rules and return them, unfiltered, from the fact
+endpoints. Enforce visibility in Phase 2, before the first read that is not
+owner-only, and before any LLM context is built from a fact.
+
+The enforcement has to be a filter in the query, not a post-fetch check applied
+to an already-loaded set. Paging makes that concrete: filtering after a page is
+fetched returns a short page while the total counts every row, so a client
+paging through results sees gaps it cannot explain. ADR-022's per-module
+`test_no_undeleted_reads` guard is the pattern to extend when a visibility
+predicate lands, so a repository that grows a read path without one is caught.
+
+**Consequences:**
+- `GET /facts/{fact_id}` returns every audience rule, including DM-only ones.
+  Correct for an owner-only API, wrong the moment a player or DM view exists.
+- `list_for_player` exists on the audience repository but is not reachable from
+  any Phase 1 endpoint. It is the deterministic half of the Phase 2 filter and
+  is here so the query is written and tested rather than improvised later.
+- Phase 2 must not build a prompt from a fact and ask a model to decide
+  visibility. The filter goes in the repository, ahead of context construction.
+
+**Reason:** Storing the rules now keeps the schema settled and gives Phase 2 a
+tested query, while the enforcement lands where it can be tested against real
+vantage points instead of asserted against a fiction.
+
+**Status:** Approved — store and return in Phase 1; enforce in Phase 2 before
+any non-owner read or any model context that includes a fact.

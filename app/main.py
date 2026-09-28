@@ -3,7 +3,7 @@
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
-from app.api.http.routes import campaigns, documents, entities, health
+from app.api.http.routes import campaigns, documents, entities, facts, health
 from app.api.http.routes.specialized_entities import routers as specialized_routers
 from app.api.websocket import router as ws_router
 from app.application.exceptions import (
@@ -22,6 +22,7 @@ app.include_router(health.router)
 app.include_router(campaigns.router)
 app.include_router(entities.router)
 app.include_router(documents.router)
+app.include_router(facts.router)
 for specialized_router in specialized_routers:
     app.include_router(specialized_router)
 app.include_router(ws_router)

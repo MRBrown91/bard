@@ -410,6 +410,25 @@ deleted_at timestamp nullable
 Visibility is fact-level. Retrieval must enforce visibility before player-facing
 context is constructed. The LLM is never the security boundary.
 
+**The audience tables carry no `campaign_id`.** A rule is in a campaign only
+through its fact, so a campaign-scoped read has to join to the parent fact and
+filter on `entity_facts.campaign_id`. The join also requires
+`entity_facts.deleted_at IS NULL`: without it, deleting a fact would leave its
+rules readable through the audience repository, because a soft-deleted parent
+is still a row that joins. Both conditions live in the repository's shared
+statement builder, so no audience read can accidentally omit them.
+
+**`audience_type` and `player_id` are paired by the application,** not by the
+schema, because ADR-011 defers database CHECK constraints. `player` requires a
+`player_id`; no other type may carry one. A `player_id` is additionally
+resolved through the campaign-scoped `PlayerRepository` on write. The pairing
+alone would accept any uuid, including one from another campaign, so the two
+checks are not redundant.
+
+**Audience rules are stored in Phase 1 but not enforced.** See ADR-025. The
+enforcement is a query filter to be added in Phase 2, before the first read that
+is not owner-only.
+
 ## Invariants
 
 - Every Entity belongs to exactly one Campaign.

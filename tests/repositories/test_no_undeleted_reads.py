@@ -68,6 +68,26 @@ def test_the_walk_finds_the_methods_it_is_meant_to_check() -> None:
     assert len(READ_METHODS) > 30, len(READ_METHODS)
 
 
+def test_every_repository_module_is_actually_checked() -> None:
+    """Guard against a module that contributes nothing to the walk.
+
+    The walk only inspects public methods that build a select, in a class
+    defined in the file. A module can satisfy that by moving every query into a
+    shared base class in another module, or into a private helper, and then no
+    method of it is checked at all while the total still looks healthy. That
+    happened to ``audience_repo.py`` when its reads were consolidated behind a
+    private ``_filtered`` on a shared base, which left four checked methods
+    becoming none.
+
+    Asserting per module, rather than only in total, is what makes the
+    difference visible.
+    """
+    modules = {name.split(":")[0] for name in READ_IDS}
+    expected = {path.name for path in REPOSITORY_DIR.glob("*_repo.py")}
+    missing = expected - modules
+    assert not missing, f"no checked read method in: {sorted(missing)}"
+
+
 @pytest.mark.parametrize(("name", "body"), READ_METHODS, ids=READ_IDS)
 def test_read_method_excludes_soft_deleted_rows(name: str, body: str) -> None:
     """Every hand-written select filters deleted_at, directly or by delegation."""
