@@ -31,9 +31,21 @@ class BaseRepository[T: DeclarativeBase](ABC):
             return stmt.where(self.model.campaign_id == self.campaign_id)  # type: ignore[attr-defined]
         return stmt
 
+    def _active_scope(self, stmt: Select[Any]) -> Select[Any]:
+        """Exclude soft-deleted rows.
+
+        Every table inherits ``deleted_at`` from ``TimestampMixin``, so this
+        applies unconditionally. Soft deletion preserves rows for retcons
+        (ADR-010); it must not make them visible to ordinary reads, or a
+        "deleted" campaign would still be fully usable and a deleted document
+        would still be returned by the API that promised to remove it.
+        """
+        return stmt.where(self.model.deleted_at.is_(None))  # type: ignore[attr-defined]
+
     async def get(self, id: UUID) -> T | None:
-        """Get by ID with campaign scope."""
-        stmt = self._campaign_scope(select(self.model).where(self.model.id == id))  # type: ignore[attr-defined]
+        """Get by ID with campaign scope, excluding soft-deleted rows."""
+        stmt = self._active_scope(select(self.model).where(self.model.id == id))  # type: ignore[attr-defined]
+        stmt = self._campaign_scope(stmt)
         result = await self.session.execute(stmt)
         return cast(T | None, result.scalar_one_or_none())
 
@@ -44,16 +56,18 @@ class BaseRepository[T: DeclarativeBase](ABC):
         limit: int = 100,
         order_by: str | None = None,
     ) -> Sequence[T]:
-        """List with pagination and campaign scope."""
-        stmt = self._campaign_scope(select(self.model)).offset(offset).limit(limit)
+        """List active rows with pagination and campaign scope."""
+        stmt = self._active_scope(select(self.model))
+        stmt = self._campaign_scope(stmt).offset(offset).limit(limit)
         if order_by and hasattr(self.model, order_by):
             stmt = stmt.order_by(getattr(self.model, order_by))
         result = await self.session.execute(stmt)
         return cast(Sequence[T], result.scalars().all())
 
     async def count(self) -> int:
-        """Count with campaign scope."""
-        stmt = self._campaign_scope(select(func.count()).select_from(self.model))
+        """Count active rows with campaign scope."""
+        stmt = self._active_scope(select(func.count()).select_from(self.model))
+        stmt = self._campaign_scope(stmt)
         result = await self.session.execute(stmt)
         return cast(int, result.scalar_one())
 
@@ -97,7 +111,8 @@ class BaseRepository[T: DeclarativeBase](ABC):
         return True
 
     async def exists(self, id: UUID) -> bool:
-        """Check existence with campaign scope."""
-        stmt = self._campaign_scope(select(self.model.id).where(self.model.id == id))  # type: ignore[attr-defined]
+        """Check existence of an active row with campaign scope."""
+        stmt = self._active_scope(select(self.model.id).where(self.model.id == id))  # type: ignore[attr-defined]
+        stmt = self._campaign_scope(stmt)
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none() is not None

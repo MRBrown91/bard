@@ -437,3 +437,71 @@ foreign keys all run child to `entities.id`, so there is no cycle to design
 around and no reason to carry a second scope.
 
 **Status:** Approved — implement as Phase 1B.2.
+
+---
+
+## ADR-022: Soft-delete filtering is enforced by BaseRepository, not per repository
+
+**Context:** ADR-010 keeps soft-deleted rows in the table so history survives a
+retcon. DATABASE.md states the resulting rule: "Soft-deleted records are
+excluded from normal active queries."
+
+The rule was not implemented anywhere. `BaseRepository.get`, `list`, `count`,
+and `exists` applied campaign scoping but never a `deleted_at` predicate, and
+only `EntityRepository` compensated with a private `_active_scope`. Every other
+table leaked deleted rows. Verified against the live database before the fix:
+
+```text
+SOFT-DELETED campaign resolves as current : 'Deleted' (deleted_at=True)
+soft-deleted docs in list()               : 1 ['ghost']
+soft-deleted docs in count()              : 1
+soft-deleted doc from get()               : ghost
+```
+
+A soft-deleted campaign was still accepted as `CurrentCampaign` and remained
+fully usable, and a soft-deleted document was still returned by the repository
+whose contract promised to remove it. The compensating filter in
+`EntityRepository` was also the more dangerous shape: it made the rule
+opt-in, so a soft delete on any other table was a silent no-op rather than an
+error.
+
+**Decision:** `_active_scope` moves to `BaseRepository` and is applied in
+`get`, `list`, `count`, and `exists`. Every table inherits `deleted_at` from
+`TimestampMixin`, so the filter is unconditional and the per-repository copies
+are deleted.
+
+Campaign scoping and deletion filtering are kept as separate methods because
+they answer different questions and only one of them is optional. `_campaign_scope`
+is a silent no-op when a model has no `campaign_id` column, which is how
+`document_statements` and `entity_aliases` inherit isolation through a parent.
+Those tables are therefore protected by the deletion filter alone, and the
+tests assert both properties for exactly those repositories. A repository that
+scopes through a parent join (see ADR-021) must still filter the parent, and
+that remains a per-repository responsibility.
+
+`soft_delete` and `update` inherit the behaviour through `get`: deleting or
+editing an already-deleted row reports failure instead of re-stamping
+`deleted_at` or writing through it.
+
+**Consequences:**
+- The DATABASE.md invariant becomes true by construction rather than by
+  remembering to add a filter. A new repository cannot get this wrong.
+- Reading history for retcons now needs a deliberate opt-out rather than the
+  default. Any future "show deleted" query has to bypass `_active_scope`
+  explicitly, which makes retention an intentional act instead of an accident.
+- This changes behaviour for users, campaigns, sessions, events, facts,
+  relationships, and audiences, which all returned deleted rows before. The
+  fix is the point, but it is a wider blast radius than documents alone, so it
+  is committed separately from P1C.1.
+- Fact provenance that points at a soft-deleted statement is no longer
+  resolvable through ordinary reads. Retcon tooling that needs to walk deleted
+  provenance has to bypass the filter, and P1C.2 should decide how that is
+  exposed.
+
+**Reason:** A retention feature that keeps rows for history but still serves
+them as live is worse than either extreme: the row is neither reliably
+archived nor reliably gone, and the caller cannot tell which. Enforcing the
+filter in the base class is the only way to make the documented guarantee
+hold for tables that do not exist yet.
+
+**Status:** Approved — implement before Phase 1C.1.

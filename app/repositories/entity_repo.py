@@ -38,10 +38,6 @@ class EntityRepository(BaseRepository[Entity]):
     def model(self) -> type[Entity]:
         return Entity
 
-    def _active_scope(self, stmt: Select[Any]) -> Select[Any]:
-        """Exclude soft-deleted entities."""
-        return stmt.where(Entity.deleted_at.is_(None))
-
     async def get(self, id: UUID) -> Entity | None:
         """Get a non-deleted entity by ID with campaign scope."""
         stmt = self._active_scope(select(Entity).where(Entity.id == id))
@@ -210,10 +206,6 @@ class EntityAliasRepository(BaseRepository[EntityAlias]):
     @property
     def model(self) -> type[EntityAlias]:
         return EntityAlias
-
-    def _active_scope(self, stmt: Select[Any]) -> Select[Any]:
-        """Exclude soft-deleted aliases."""
-        return stmt.where(EntityAlias.deleted_at.is_(None))
 
     async def get(self, id: UUID) -> EntityAlias | None:
         """Get a non-deleted alias by ID."""
