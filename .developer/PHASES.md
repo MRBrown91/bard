@@ -26,6 +26,7 @@
 - pgvector embeddings.
 - Semantic retrieval behind an application interface.
 - Visibility-aware context assembly.
+- Stateless entity-matching candidate generation (P3.1) — see ADR-028.
 
 ## Phase 4 — Live session intelligence
 

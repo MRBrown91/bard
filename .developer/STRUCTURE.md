@@ -108,3 +108,23 @@ Application services are use-case oriented, not model-oriented:
 * `app/application/entities/` — Entity creation, alias management, specialized entity CRUD, and matching
 * `app/application/facts/` — Fact extraction and invalidation
 * `app/application/realtime/` — Live transcript processing
+
+### Matching state is an accepted interim exception
+
+Everything above the transport layer is stateless per request: each call
+constructs its own repository, and authorization is enforced per request. Entity
+matching is the one exception, and it is easy to miss because nothing in the
+request path reveals it.
+
+`app/application/entities/matching_vocabulary.py` holds `MATCHING_VOCABULARIES`,
+a bounded process-local LRU of built per-campaign vocabularies. A write in one
+worker process cannot invalidate another process's copy, so a multi-worker
+deployment has a staleness window bounded by the next write to that campaign in
+that process. The current single-worker deployment is not exposed; the exposure
+is prospective, and it is the reason this is written down rather than left to be
+discovered during a scale-up.
+
+Replacing it is Phase 3 work (P3.1) and is an eventual necessity, not an MVP
+gate — candidate generation moves into SQL so the database returns plausible
+rows instead of the whole vocabulary. See ADR-028 for the reasoning, the
+`max_campaigns=0` escape hatch, and the conditions that would pull it forward.

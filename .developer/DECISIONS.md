@@ -857,3 +857,74 @@ while the other half is enforced, so:
 - The vocabulary query is now one statement instead of two. Every existing
   matching test still passes unmodified, because the pipeline never learns where
   a term came from.
+
+## ADR-028: Process-local matching state is a known and accepted interim state
+
+**Context:** ADR-026 shipped the matcher with a bounded process-local LRU
+(`MATCHING_VOCABULARIES`, 32 campaigns) and stated its limitation plainly: a
+write in one worker process cannot reach another process's cache, so a
+multi-worker deployment has a staleness window bounded by the next write to that
+campaign *in that process*, not by any cross-process signal. ADR-027 made this
+more pressing rather than less, because it fixed the table the eventual fix must
+index and therefore removed the last reason to defer the decision.
+
+The current deployment is not exposed. `Dockerfile:12` runs a single Uvicorn
+worker, so there is only one cache to be stale. The exposure is entirely
+prospective, which is precisely why it is easy to leave unrecorded: the design
+looks stateless, because every request does construct its own repository and
+authorization is enforced per request. It is the *matching* state that is
+process-local, and nothing in the request path reveals that.
+
+**Decision:** Record that process-local matching state is an accepted interim
+state, not the intended end state, and that moving candidate generation into SQL
+is an eventual necessity. It is **not** a Phase 1 gate and does not block the
+MVP. Phase 1 keeps the LRU; the replacement is Phase 3 work (P3.1).
+
+This is a decision about *sequencing and honesty*, not about which approach
+wins. The direction is already settled — ADR-026 named the SQL trigram path as
+the remaining fix, and ADR-027 made `entity_aliases` the single table to index —
+so the open question was never whether, only when.
+
+**Why it is not an MVP blocker.** Every condition that would make it one is
+either absent or measured, and none of them is a correctness failure:
+
+- **Scale.** The current cost is a ~225 ms cold start at 11k terms, 2.7 ms warm,
+  and 45 ms at 110k. At one Uvicorn worker, a 225 ms first-call cost is paid once
+  per campaign per process lifetime. The threshold where this hurts is
+  campaigns large enough that the cold start is felt per restart — not reachable
+  in Phase 1, whose realistic entity counts are far below 11k.
+- **Correctness.** Staleness is only reachable at more than one worker, and
+  entity and alias writes are rare compared to recognition reads. The write paths
+  that must invalidate are enumerated in `tests/application/test_matching_vocabulary.py`
+  rather than left to memory.
+- **Escape hatch.** A deployment that cannot tolerate any staleness already has
+  one: construct `MATCHING_VOCABULARIES` with `max_campaigns=0`, which
+  disables caching entirely and accepts a query per call.
+
+**What changes when it is done (P3.1):**
+- `pg_trgm` becomes a dependency and needs its own migration and an ADR.
+- Candidate generation moves from "load every term, then narrow in Python" to
+  "ask the database for plausible rows." `entity_aliases` is the table to index
+  (ADR-027), joined to `entities` for campaign scope, since it carries no
+  `campaign_id`.
+- Trigram similarity is a **heuristic superset filter, never the decision**, and
+  the asymmetry matters: trigram similarity can *miss* true edit-distance
+  neighbours on short strings, which the delete index provably cannot. So the
+  Python `levenshtein_within` confirmation must stay authoritative even after the
+  index exists, or short-term recall regresses silently.
+- `tests/application/test_delete_index_equivalence.py` becomes the oracle for
+  this change: the SQL path must agree with the brute-force reference across
+  randomized vocabularies, corrupted probes, unicode terms and reduced distance
+  settings, or the change is not equivalent.
+- The process-local LRU is removed, not layered under.
+
+**Consequences:**
+- Phase 1 exits with a documented interim state, and `MATCHING_VOCABULARIES` is
+  read as a placeholder with a known end date rather than as architecture.
+- A second worker is not a safe scaling step for recognition until P3.1 lands.
+  This is the concrete constraint to respect when deployment topology is
+  revisited, and it is recorded here because nothing at runtime will report it.
+- Phase 2 ingestion volume is the thing to watch. If ingestion makes campaigns
+  large enough for the 225 ms cold start to be felt, that is the trigger to pull
+  P3.1 forward — but it is a trigger, not a reason to build it speculatively
+  during Phase 1.

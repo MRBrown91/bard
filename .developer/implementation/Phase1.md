@@ -268,7 +268,7 @@ Two rules earned their tests through live-database failures that the mocked test
 
 ### P1C.2 — Document Statement API
 
-**Status:** `Planning`
+**Status:** `Approved`
 
 **Goal:** Atomic statement management within documents.
 
