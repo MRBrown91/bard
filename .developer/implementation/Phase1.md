@@ -516,8 +516,42 @@ That method runs **two** scoped projections, not one outer join. A join returns 
   call. Same reasoning as dropping `FactService` for P1D.1.
 
 **Tests:** 56 pipeline unit tests (each tier in isolation, plus no-substring,
-overlap, phrase, Unicode, blank-term, and determinism cases) and 17 matcher
-tests (per-entity collapse, shared names, settings, empty input).
+overlap, phrase, Unicode, blank-term, and determinism cases), 17 matcher tests
+(per-entity collapse, shared names, settings, empty input), 6 delete-index
+equivalence tests against a brute-force reference scan, and 6 latency budgets.
+
+**Performance (see ADR-026):** The first version compared every word against
+every term in the campaign. At 1,000 entities with ten aliases each — 11,000
+terms — that was 1,114 ms per transcript, and no functional test noticed,
+because a slow matcher returns the right answers too.
+
+Two fixes, which only pay off together:
+
+- **A delete index** replaces the scan. Each term is indexed under every
+  string reachable by deleting up to `MAX_FUZZY_DISTANCE` characters; a query
+  generates the same set from the word in the text. It is a *superset* filter,
+  so it cannot miss a real match, and every candidate is still confirmed with a
+  real edit distance — it narrows the work, it does not decide the answer.
+- **A bounded per-campaign vocabulary cache** removes the query and the index
+  build from all but the first call.
+
+Measured, same 54-word transcript:
+
+| entities | terms | before | after (warm) | speedup |
+|---|---|---|---|---|
+| 100 | 1,100 | 119 ms | 5.9 ms | 20x |
+| 1,000 | 11,000 | 1,114 ms | 9.5 ms | 118x |
+| 10,000 | 110,000 | 11,404 ms | 45 ms | 251x |
+
+The first call for a campaign still pays ~225 ms to build the vocabulary and
+index at 11k terms. That is a cache miss, and it is why the two fixes ship as a
+pair: measured alone, the index is *slower* than the scan for a single call at
+every size tested, and breaks even after about two calls.
+
+`tests/performance/test_matching_performance.py` asserts both a ratio against
+a scan measured on the same machine (immune to hardware speed) and a generous
+absolute ceiling, because a wall-clock number alone is a flaky test and a
+correct-but-slow matcher passes every other assertion in the suite.
 
 **Edge case the unit tests could not have caught:** the vocabulary query was
 correct against mocked rows and wrong against the database. Mocking the

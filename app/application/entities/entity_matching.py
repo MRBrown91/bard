@@ -17,10 +17,12 @@ from uuid import UUID
 from app.application.entities.matching_pipeline import (
     MatchSettings,
     TermMatch,
+    Vocabulary,
     build_vocabulary,
     find_term_matches,
     make_entry,
 )
+from app.application.entities.matching_vocabulary import MATCHING_VOCABULARIES
 from app.repositories import EntityRepository
 
 
@@ -60,21 +62,40 @@ class EntityMatcher:
         """
         if not text.strip():
             return []
-        terms = await self.entity_repo.list_match_terms()
-        if not terms:
+        vocabulary = await self._vocabulary()
+        if not vocabulary.entries:
             return []
-        entries = [
+        matches = find_term_matches(text, vocabulary, self.settings)
+        return self._best_per_entity(matches)
+
+    async def _vocabulary(self) -> Vocabulary:
+        """Return this campaign's vocabulary, building it at most once.
+
+        The vocabulary is derived state over rows that change rarely and are
+        read constantly, so it is cached per campaign and dropped by the entity
+        and alias write paths. A repository with no campaign cannot be cached:
+        without a key there is nothing to scope the entry to, and a shared
+        bucket would hand one caller vocabulary another caller could see.
+        """
+        campaign_id = self.entity_repo.campaign_id
+        if campaign_id is None:
+            return await self._build_vocabulary()
+        cached = MATCHING_VOCABULARIES.get(campaign_id)
+        if cached is None:
+            cached = await self._build_vocabulary()
+            MATCHING_VOCABULARIES.put(campaign_id, cached)
+        return cached
+
+    async def _build_vocabulary(self) -> Vocabulary:
+        terms = await self.entity_repo.list_match_terms()
+        return build_vocabulary(
             entry
             for term in terms
             if (entry := make_entry(
                 term.entity_id, term.name, term.term, is_alias=term.is_alias
             ))
             is not None
-        ]
-        if not entries:
-            return []
-        matches = find_term_matches(text, build_vocabulary(entries), self.settings)
-        return self._best_per_entity(matches)
+        )
 
     def _best_per_entity(self, matches: list[TermMatch]) -> list[EntityCandidate]:
         """Collapse matches to one candidate per entity, then order them."""

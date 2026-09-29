@@ -2,6 +2,7 @@
 
 from uuid import UUID
 
+from app.application.entities.matching_vocabulary import invalidate_vocabulary
 from app.application.exceptions import NotFoundError, ValidationError
 from app.repositories import EntityAliasRepository, EntityRepository
 from app.schemas.entity import EntityRead, EntityUpdate
@@ -39,6 +40,10 @@ async def update_entity(
 
     if entity is None:
         raise NotFoundError("Entity not found", {"entity_id": str(entity_id)})
+    if changes:
+        # A renamed entity stops matching its old name, which only the cache
+        # knows about. Description-only edits leave the vocabulary untouched.
+        invalidate_vocabulary(entity_repo)
     return EntityRead.model_validate(entity)
 
 
@@ -54,6 +59,9 @@ async def soft_delete_entity(
     """
     if not await entity_repo.soft_delete_with_specializations(entity_id):
         raise NotFoundError("Entity not found", {"entity_id": str(entity_id)})
+    # A deleted entity must stop being recognized while its row lives on for
+    # retcons, so the cached vocabulary is now wrong in the dangerous direction.
+    invalidate_vocabulary(entity_repo)
 
 
 async def remove_alias(
@@ -72,3 +80,4 @@ async def remove_alias(
         raise NotFoundError("Alias not found", {"alias_id": str(alias_id)})
 
     await alias_repo.soft_delete(alias_id)
+    invalidate_vocabulary(entity_repo)

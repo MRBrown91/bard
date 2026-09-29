@@ -35,8 +35,15 @@ def term(
 def matcher(
     *terms: MatchTerm, settings: MatchSettings | None = None
 ) -> tuple[EntityMatcher, AsyncMock]:
-    """Build a matcher over a stubbed repository holding these terms."""
+    """Build a matcher over a stubbed repository holding these terms.
+
+    Each matcher gets its own campaign id so the process-wide vocabulary cache
+    cannot serve one test's terms to another. The stub keeps a real attribute
+    here rather than a mock, because the matcher reads it to decide whether the
+    result may be cached at all.
+    """
     repo = AsyncMock(spec=EntityRepository)
+    repo.campaign_id = uuid4()
     repo.list_match_terms.return_value = list(terms)
     return EntityMatcher(repo, settings), repo
 

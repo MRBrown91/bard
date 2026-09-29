@@ -51,6 +51,10 @@ CASELESS_NAME_CONFIDENCE = 0.9
 CASELESS_ALIAS_CONFIDENCE = 0.85
 #: Keyed by edit distance, and deliberately the only source of a fuzzy score.
 FUZZY_CONFIDENCE: dict[int, float] = {1: 0.8, 2: 0.7}
+#: Largest distance the pipeline can be asked for. The delete index is built for
+#: this regardless of the setting in force, so a caller asking for distance 1
+#: gets a superset of the right candidates rather than a differently shaped one.
+MAX_FUZZY_DISTANCE = max(FUZZY_CONFIDENCE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,8 +121,30 @@ class Vocabulary:
     entries: tuple[VocabularyEntry, ...] = ()
     exact: dict[str, list[VocabularyEntry]] = field(default_factory=dict)
     caseless: dict[str, list[VocabularyEntry]] = field(default_factory=dict)
-    by_length: dict[int, list[VocabularyEntry]] = field(default_factory=dict)
     max_tokens: int = 1
+    _delete_index: dict[str, list[VocabularyEntry]] | None = None
+
+    def delete_index(self) -> dict[str, list[VocabularyEntry]]:
+        """Return the delete index, building it on first use.
+
+        Maps every string reachable from a term by deleting up to
+        :data:`MAX_FUZZY_DISTANCE` characters to the terms that produced it. A
+        query generates the same set from the word in the text and looks it up,
+        so a fuzzy candidate costs a handful of dict reads instead of a scan of
+        the whole vocabulary.
+
+        Built lazily because it is pure derived state: a vocabulary that is
+        never fuzzy matched, or a campaign small enough that scanning is
+        cheaper, should not pay to build one. The cost is amortized across calls
+        because the vocabulary is cached per campaign.
+        """
+        if self._delete_index is None:
+            index: dict[str, list[VocabularyEntry]] = {}
+            for entry in self.entries:
+                for variant in delete_variants(entry.normalized):
+                    index.setdefault(variant, []).append(entry)
+            self._delete_index = index
+        return self._delete_index
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,17 +238,14 @@ def build_vocabulary(entries: Iterable[VocabularyEntry]) -> Vocabulary:
 
     exact: dict[str, list[VocabularyEntry]] = {}
     caseless: dict[str, list[VocabularyEntry]] = {}
-    by_length: dict[int, list[VocabularyEntry]] = {}
     for entry in entries:
         exact.setdefault(" ".join(entry.tokens), []).append(entry)
         caseless.setdefault(entry.normalized, []).append(entry)
-        by_length.setdefault(len(entry.normalized), []).append(entry)
 
     return Vocabulary(
         entries=tuple(entries),
         exact=exact,
         caseless=caseless,
-        by_length=by_length,
         max_tokens=max((len(entry.tokens) for entry in entries), default=1),
     )
 
@@ -262,15 +285,44 @@ def _best_tier(
     )
 
 
+def delete_variants(
+    normalized: str, distance: int = MAX_FUZZY_DISTANCE
+) -> set[str]:
+    """Every string reachable by deleting up to ``distance`` characters.
+
+    Includes ``normalized`` itself, so a lookup can also find exact hits; the
+    caller discards distance 0, which the case-insensitive tier already reports.
+
+    This is what makes fuzzy matching sublinear. If two strings are within edit
+    distance ``d``, one of them is reachable from the other by at most ``d``
+    substitutions and insertions, which means some string survives in both
+    after at most ``d`` deletions each. Generating that set for the text and
+    looking it up therefore *cannot* miss a real match, while a length-filtered
+    scan of the vocabulary had no way to tell which of its entries to compare.
+    """
+    variants = {normalized}
+    frontier = {normalized}
+    for _ in range(distance):
+        deeper = set()
+        for variant in frontier:
+            for index in range(len(variant)):
+                deeper.add(variant[:index] + variant[index + 1 :])
+        deeper -= variants
+        variants |= deeper
+        frontier = deeper
+    return variants
+
+
 def _fuzzy_best(
     normalized: str, vocabulary: Vocabulary, settings: MatchSettings
 ) -> tuple[tuple[VocabularyEntry, ...], float] | None:
     """Find the closest entries within the distance limit.
 
-    Only entries whose length is within the limit are compared. That is a
-    necessary condition for any distance at or under the limit, so it costs no
-    real matches, and it is what keeps this from scanning the whole vocabulary
-    for every word in the text.
+    Candidates come from the delete index rather than from scanning every term
+    of a similar length, which is what keeps a large campaign from costing a
+    full vocabulary comparison per word. The index is a *superset* of the true
+    candidate set, so every candidate is still confirmed by a real edit
+    distance: this narrows the work, it does not decide the answer.
 
     Every entry at the winning distance comes back, and a name beats an alias at
     the same distance, so a shared term is not reported for one entity and
@@ -278,24 +330,26 @@ def _fuzzy_best(
     """
     if len(normalized) < settings.min_fuzzy_length:
         return None
+    index = vocabulary.delete_index()
+    candidates: set[VocabularyEntry] = set()
+    for variant in delete_variants(normalized):
+        candidates.update(index.get(variant, ()))
+
     scored: list[tuple[int, int, VocabularyEntry]] = []
-    lowest = len(normalized) - settings.max_fuzzy_distance
-    highest = len(normalized) + settings.max_fuzzy_distance
-    for length in range(lowest, highest + 1):
-        for entry in vocabulary.by_length.get(length, ()):
-            if len(entry.normalized) < settings.min_fuzzy_length:
-                continue
-            distance = levenshtein_within(
-                normalized, entry.normalized, settings.max_fuzzy_distance
-            )
-            if distance is None or distance == 0:
-                # Zero means equal, which the case-insensitive tier already
-                # reports. Scoring it again would only add a second, worse
-                # candidate for the same term.
-                continue
-            # 0 for a name, 1 for an alias, so a name wins a distance tie the
-            # same way it wins a tier tie in the exact buckets.
-            scored.append((distance, 1 if entry.is_alias else 0, entry))
+    for entry in candidates:
+        if len(entry.normalized) < settings.min_fuzzy_length:
+            continue
+        distance = levenshtein_within(
+            normalized, entry.normalized, settings.max_fuzzy_distance
+        )
+        if distance is None or distance == 0:
+            # Zero means equal, which the case-insensitive tier already
+            # reports. Scoring it again would only add a second, worse
+            # candidate for the same term.
+            continue
+        # 0 for a name, 1 for an alias, so a name wins a distance tie the
+        # same way it wins a tier tie in the exact buckets.
+        scored.append((distance, 1 if entry.is_alias else 0, entry))
     if not scored:
         return None
     best = min((distance, kind) for distance, kind, _ in scored)

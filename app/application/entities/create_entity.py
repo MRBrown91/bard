@@ -2,6 +2,7 @@
 
 from uuid import UUID
 
+from app.application.entities.matching_vocabulary import invalidate_vocabulary
 from app.application.exceptions import ConflictError, NotFoundError
 from app.repositories import EntityAliasRepository, EntityRepository
 from app.schemas.entity import (
@@ -35,6 +36,8 @@ async def create_entity(
     for alias_data in data.aliases:
         await alias_repo.create(entity_id=entity.id, alias=alias_data.alias)
 
+    # A new name and new aliases are both new matchable terms.
+    invalidate_vocabulary(entity_repo)
     return EntityRead.model_validate(entity)
 
 
@@ -57,4 +60,5 @@ async def add_alias(
         )
 
     alias = await alias_repo.create(entity_id=entity_id, alias=data.alias)
+    invalidate_vocabulary(entity_repo)
     return EntityAliasRead.model_validate(alias)

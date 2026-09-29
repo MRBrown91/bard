@@ -697,3 +697,96 @@ vantage points instead of asserted against a fiction.
 
 **Status:** Approved — store and return in Phase 1; enforce in Phase 2 before
 any non-owner read or any model context that includes a fact.
+
+## ADR-026: Entity recognition keeps its vocabulary in process, narrowed by a delete index
+
+**Context:** P1E.1 shipped a deterministic matcher that loads every name and
+alias in a campaign on every recognition call and then scans that vocabulary
+per text token. Measured on this repository's dev machine with a 54-word
+transcript:
+
+| terms | match time | index build | no fuzzy |
+|---|---|---|---|
+| 1,100 | 119 ms | 0.3 ms | 0.1 ms |
+| 11,000 | 1,114 ms | 2.7 ms | 0.2 ms |
+| 110,000 | 11,404 ms | 33 ms | 0.6 ms |
+| 550,000 | 56,976 ms | 178 ms | 2.3 ms |
+
+Two separate costs, both linear in campaign size. The scan is the larger one:
+`_fuzzy_best` compared every word against every term whose length was within
+the edit limit, and at 11k terms essentially all of them qualified, so the
+length bucketing filtered nothing. The profile showed 4.9M calls to
+`levenshtein_within` for a 125-word transcript.
+
+Nothing caught it. Functional tests pass on a slow implementation exactly as
+they do on a fast one, because a slow matcher still returns the right
+candidates. The only honest signal is a latency budget.
+
+An 11,000-term campaign is 1,000 entities with ten aliases each. That is
+plausible for a long-running campaign, and P1F calls recognition once per
+transcript message, so the cost was about to be paid on every line of
+narration.
+
+Two candidate narrowings were measured before anything was written:
+
+- **A cheap per-entry pre-filter** (character-multiset L1 distance bounded by
+  twice the edit limit, which is a sound necessary condition). It was
+  *slower*: 183 ms against 173 ms at 11k terms, 977 ms against 848 ms at
+  55k. Natural-language terms share character multisets too often for the
+  filter to reject anything, and the Python-level work per entry costs more
+  than the comparison it avoids. Not used.
+- **A delete index.** Every term is indexed under each string reachable from
+  it by deleting up to `MAX_FUZZY_DISTANCE` characters; a query generates the
+  same set from the word in the text and looks it up. 11k terms index to 59,840
+  keys in 16 MB and answer a 39-token transcript in 2 ms against 147 ms for
+  the scan, a 73x improvement. Used.
+
+**Decision:** Narrow fuzzy candidates with a delete index, and keep each
+campaign's built vocabulary in a bounded process-local cache.
+
+The index is a *superset* filter, never the decision. If two strings are
+within edit distance `d`, some string survives in both after at most `d`
+deletions each, so index lookup cannot miss a real match; every returned
+candidate is then confirmed by a real `levenshtein_within` call, and the
+winning distance still comes from that measurement. `tests/application/
+test_delete_index_equivalence.py` keeps a brute-force reference scan and
+asserts the two agree across randomized vocabularies, deliberately corrupted
+probes, unicode terms and reduced distance settings. The earlier length-bucketed
+`Vocabulary.by_length` index was removed once nothing read it.
+
+The index is built lazily on first fuzzy lookup and the vocabulary is cached
+per campaign, because the two only pay off together. Measured in isolation the
+index is *worse* than the scan for a single call at every size tested — the
+build costs about twice one scan — and it breaks even after roughly two calls.
+Caching without the index would leave a per-message scan; the index without
+caching would add a build to every message. The full vocabulary is 57 bytes
+per term, so an unbounded cache is a memory leak with extra steps, and the LRU
+is bounded at 32 campaigns with eviction documented as costing only a rebuild.
+
+**Consequences:**
+- Recognition over 11k terms goes from 1,114 ms to 9.5 ms per message, and to
+  45 ms at 110k terms. The first call for a campaign still pays ~225 ms to
+  build the vocabulary and index; that is a cache miss, not a regression.
+- **The cache is process-local, and this is a real limitation.** Invalidation
+  is an explicit call from the five use cases that can change a vocabulary
+  (`create_entity`, `add_alias`, `update_entity`, `soft_delete_entity`,
+  `remove_alias`), so a write in one worker process does not reach another's
+  cache. A multi-worker deployment therefore has a staleness window bounded by
+  the next write to that campaign in that process, not by any cross-process
+  signal. Entity and alias writes are rare compared to recognition reads, which
+  is why this is accepted for Phase 1 and stated rather than hidden. Fixing it
+  properly needs a shared version marker, which belongs with the indexing work
+  described below rather than invented alongside it. A deployment that cannot
+  tolerate staleness constructs `MATCHING_VOCABULARIES` with `max_campaigns=0`.
+- A missed invalidation is not a stale read of old data. A soft-deleted entity
+  whose vocabulary is still cached keeps answering to its name, so the write
+  paths are enumerated in
+  `tests/application/test_matching_vocabulary.py` rather than left to memory.
+- The scan's asymptotics are now fine for realistic campaigns, but the
+  vocabulary is still fully materialized per campaign in memory and still read
+  in one query. Past roughly 100k terms — larger than any plausible campaign,
+  and included in the stress case only to find the shape — the remaining fix is
+  to push candidate generation into SQL with a trigram index, so the database
+  returns plausible rows instead of the whole vocabulary. That is deliberately
+  **not** done here: it adds a Postgres extension dependency, changes where
+  matching happens, and needs its own decision.
