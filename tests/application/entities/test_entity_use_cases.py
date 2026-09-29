@@ -51,12 +51,15 @@ def make_entity(campaign_id: UUID | None = None, **overrides: object) -> MagicMo
     return entity
 
 
-def make_alias(entity_id: UUID, alias: str = "The Innkeeper") -> MagicMock:
+def make_alias(
+    entity_id: UUID, alias: str = "The Innkeeper", kind: str = "alias"
+) -> MagicMock:
     """Build an EntityAlias-like mock."""
     row = MagicMock()
     row.id = uuid4()
     row.entity_id = entity_id
     row.alias = alias
+    row.kind = kind
     row.created_at = NOW
     row.updated_at = NOW
     row.deleted_at = None
@@ -88,9 +91,21 @@ def alias_repo_stub() -> AsyncMock:
     async def create(**kwargs: object) -> MagicMock:
         entity_id = kwargs["entity_id"]
         assert isinstance(entity_id, UUID)
-        return make_alias(entity_id=entity_id, alias=str(kwargs["alias"]))
+        return make_alias(
+            entity_id=entity_id,
+            alias=str(kwargs["alias"]),
+            kind=str(kwargs.get("kind", "alias")),
+        )
+
+    async def rename(entity_id: UUID, name: str) -> bool:
+        repo.renamed_to = name
+        return True
 
     repo.create.side_effect = create
+    repo.rename.side_effect = rename
+    repo.get_name_alias.side_effect = lambda entity_id: make_alias(
+        entity_id=entity_id, alias="Larkfellow", kind="name"
+    )
     repo.session = AsyncMock(spec=AsyncSession)
     return repo
 
@@ -115,7 +130,11 @@ class TestCreateEntity:
         repo.create.assert_awaited_once_with(
             entity_type="actor", name="Larkfellow", description=None
         )
-        alias_repo.create.assert_not_awaited()
+        # The name is held as a name row, so the entity is matchable by it
+        # without the vocabulary query having to union anything.
+        alias_repo.create.assert_awaited_once_with(
+            entity_id=result.id, alias="Larkfellow", kind="name"
+        )
 
     @pytest.mark.asyncio
     async def test_creates_aliases_in_request_order(self) -> None:
@@ -137,7 +156,30 @@ class TestCreateEntity:
         )
 
         created = [call.kwargs["alias"] for call in alias_repo.create.await_args_list]
-        assert created == ["Innkeeper", "Host"]
+        # The name row comes first, then the requested aliases in order.
+        assert created == ["Larkfellow", "Innkeeper", "Host"]
+        kinds = [call.kwargs["kind"] for call in alias_repo.create.await_args_list]
+        assert kinds == ["name", "alias", "alias"]
+
+    @pytest.mark.asyncio
+    async def test_rejects_an_alias_duplicating_the_name(self) -> None:
+        """The name is already a row, so accepting this would be a 409 from
+        the unique index rather than a clear rejection."""
+        repo = entity_repo_stub()
+        alias_repo = alias_repo_stub()
+
+        with pytest.raises(ConflictError):
+            await create_entity(
+                EntityCreate(
+                    entity_type="actor",
+                    name="Larkfellow",
+                    aliases=[EntityAliasCreate(alias="Larkfellow")],
+                ),
+                repo,
+                alias_repo,
+            )
+
+        repo.create.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_rejects_duplicate_aliases_in_request(self) -> None:
@@ -180,7 +222,29 @@ class TestAddAlias:
 
         assert result.entity_id == entity_id
         assert result.alias == "Host"
-        alias_repo.create.assert_awaited_once_with(entity_id=entity_id, alias="Host")
+        assert result.kind == "alias"
+        alias_repo.create.assert_awaited_once_with(
+            entity_id=entity_id, alias="Host", kind="alias"
+        )
+
+    @pytest.mark.asyncio
+    async def test_rejects_an_alias_equal_to_the_entity_name(self) -> None:
+        """The name is already a row, so this would violate the unique index.
+
+        Caught here so the caller learns why, rather than seeing a constraint
+        violation surface as a 500.
+        """
+        entity_id = uuid4()
+        repo = entity_repo_stub()
+        repo.get.return_value = make_entity(id=entity_id, name="Host")
+        alias_repo = alias_repo_stub()
+
+        with pytest.raises(ConflictError):
+            await add_alias(
+                entity_id, EntityAliasCreate(alias="Host"), repo, alias_repo
+            )
+
+        alias_repo.create.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_missing_entity_is_not_found(self) -> None:
@@ -310,15 +374,67 @@ class TestUpdateEntity:
     async def test_applies_only_supplied_fields(self) -> None:
         """Fields absent from the request body are left untouched."""
         repo = entity_repo_stub()
+        alias_repo = alias_repo_stub()
+        alias_repo.get_by_alias.return_value = None
 
-        await update_entity(uuid4(), EntityUpdate(name="New Name"), repo)
+        await update_entity(
+            uuid4(), EntityUpdate(name="New Name"), repo, alias_repo
+        )
 
         repo.update.assert_awaited_once()
         assert repo.update.await_args.kwargs == {"name": "New Name"}
 
     @pytest.mark.asyncio
+    async def test_renaming_moves_the_natural_name_alias(self) -> None:
+        """The name row is what the matcher reads, so it moves with the name.
+
+        Leaving it behind would leave the entity matchable only by a name it no
+        longer has.
+        """
+        entity_id = uuid4()
+        repo = entity_repo_stub()
+        alias_repo = alias_repo_stub()
+        alias_repo.get_by_alias.return_value = None
+
+        await update_entity(
+            entity_id, EntityUpdate(name="New Name"), repo, alias_repo
+        )
+
+        alias_repo.rename.assert_awaited_once_with(entity_id, "New Name")
+
+    @pytest.mark.asyncio
+    async def test_renaming_onto_an_existing_alias_is_refused(self) -> None:
+        """The (entity_id, alias) unique index would reject it anyway."""
+        entity_id = uuid4()
+        repo = entity_repo_stub()
+        alias_repo = alias_repo_stub()
+        alias_repo.get_by_alias.return_value = make_alias(
+            entity_id, alias="New Name"
+        )
+
+        with pytest.raises(ConflictError):
+            await update_entity(
+                entity_id, EntityUpdate(name="New Name"), repo, alias_repo
+            )
+
+        repo.update.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_renaming_without_an_alias_repository_is_refused(self) -> None:
+        """A rename that cannot move the name row is a validation error, not a
+        half-applied write."""
+        repo = entity_repo_stub()
+
+        with pytest.raises(ValidationError):
+            await update_entity(uuid4(), EntityUpdate(name="New Name"), repo)
+
+    @pytest.mark.asyncio
     async def test_allows_clearing_nullable_description(self) -> None:
-        """An explicit null description is a change, not an omission."""
+        """An explicit null description is a change, not an omission.
+
+        A description edit leaves the vocabulary alone, so it needs no alias
+        repository.
+        """
         repo = entity_repo_stub()
 
         await update_entity(uuid4(), EntityUpdate(description=None), repo)
@@ -401,6 +517,26 @@ class TestRemoveAlias:
         await remove_alias(entity_id, alias.id, repo, alias_repo)
 
         alias_repo.soft_delete.assert_awaited_once_with(alias.id)
+
+    @pytest.mark.asyncio
+    async def test_refuses_to_remove_the_natural_name_alias(self) -> None:
+        """The name row is what makes the entity matchable by its own name.
+
+        Removing it would leave an entity that exists but can never be
+        recognised by the name it is called, so the route is closed and the
+        caller is told to rename instead.
+        """
+        entity_id = uuid4()
+        alias = make_alias(entity_id, alias="Larkfellow", kind="name")
+        repo = entity_repo_stub()
+        repo.get.return_value = make_entity(id=entity_id)
+        alias_repo = alias_repo_stub()
+        alias_repo.get.return_value = alias
+
+        with pytest.raises(ValidationError):
+            await remove_alias(entity_id, alias.id, repo, alias_repo)
+
+        alias_repo.soft_delete.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_alias_of_another_entity_is_not_found(self) -> None:

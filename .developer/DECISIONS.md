@@ -790,3 +790,70 @@ is bounded at 32 campaigns with eviction documented as costing only a rebuild.
   returns plausible rows instead of the whole vocabulary. That is deliberately
   **not** done here: it adds a Postgres extension dependency, changes where
   matching happens, and needs its own decision.
+
+## ADR-027: An entity's own name is stored in `entity_aliases` as a `name` row
+
+**Context:** ADR-026 left one open question about where candidate terms should
+come from, and the pending SQL-side indexing work makes it urgent: the trigram
+index decision has to name a table, and `entity_aliases` cannot be indexed
+alone because it carries no `campaign_id` — campaign scope reaches it only by
+joining `entities`. So the vocabulary query is a join either way, and the real
+question is what the vocabulary *is*.
+
+The previous shape was two scoped projections, an entity's `name` from
+`entities` and every `alias` from `entity_aliases`, unioned in Python. That
+shape existed because of a bug: a single outer join returns one row per
+(entity, alias) pair, so an entity *with* an alias contributed only its alias
+and became unmatchable by its real name. P1E.1 fixed it with two queries rather
+than with a constraint, which left the guarantee in the query's shape.
+
+**Decision:** Store every matchable term in `entity_aliases`, including the
+entity's own name, distinguished by a new `kind` column (`name` | `alias`).
+The vocabulary becomes one join, and `is_alias` is read off each row's kind
+rather than inferred from which query produced it.
+
+**Why, given it is not faster.** Measured, the union was never the cost: the
+query's time is dominated by the trigram scan and `levenshtein()` calls in the
+SQL-side design, and the join to `entities` remains either way. This was chosen
+for comprehension — one table means "the set of strings that can match this
+entity", readable without knowing which query a term came from. That is a real
+maintainability argument, and it also happens to make the SQL-side path
+single-table, which is a prerequisite for the decision still open.
+
+**The cost, accepted deliberately.** The entity's name now exists in two places
+and can drift, and an entity contributes its name *because a `name` row exists*
+rather than because of how the query is written. That is an invariant maintained
+by five write paths instead of a structural guarantee. It is defensible only
+while the other half is enforced, so:
+
+- `uq_entity_aliases_one_name` is a partial unique index on
+  `entity_aliases (entity_id) WHERE kind = 'name' AND deleted_at IS NULL`, which
+  makes a *second* live name row impossible. Soft-deleted rows are excluded so
+  a retcon can restore one without tripping it.
+- Existence is asserted in a test rather than by convention:
+  `test_every_live_entity_has_exactly_one_live_name_alias`. A cross-table
+  invariant cannot be a `CHECK`, and a trigger would put domain logic in the
+  database, so the test is the enforcement and the index is the backstop.
+
+**Consequences:**
+- The confidence tiers survive unchanged, which is why this is a storage change
+  rather than a behaviour change: an exact name is still 1.0 and an exact alias
+  still 0.95. Verified end to end against the real database, including that a
+  renamed entity's old name drops to the distance-2 tier (0.7) rather than
+  vanishing, since `"sela viper"` is genuinely two edits from `"selina viper"`.
+- `create_entity` writes the name row first, then the requested aliases;
+  `update_entity` retargets it on a rename and refuses a rename that collides
+  with an existing alias; `add_alias` rejects an alias equal to the name;
+  `remove_alias` refuses a `name` row, pointing the caller at renaming instead;
+  `soft_delete_with_specializations` stamps it in the same transaction as the
+  specialization, which is the same hazard that method already existed for.
+- A rename without an alias repository is a `ValidationError` rather than a
+  half-applied write that leaves an entity matchable only by a name it no longer
+  has. The HTTP route supplies one.
+- `EntityAliasRead` exposes `kind`, so `GET /entities/{id}` shows the name row
+  among the aliases. Reporting actual table state was preferred over hiding it,
+  since a filtered alias list would under-report what is stored and reintroduce
+  the two-representation problem this decision removed.
+- The vocabulary query is now one statement instead of two. Every existing
+  matching test still passes unmodified, because the pipeline never learns where
+  a term came from.

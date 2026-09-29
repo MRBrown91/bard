@@ -55,12 +55,15 @@ def make_entity_row(campaign_id: UUID, name: str = "Larkfellow") -> MagicMock:
     return row
 
 
-def make_alias_row(entity_id: UUID, alias: str = "Host") -> MagicMock:
+def make_alias_row(
+    entity_id: UUID, alias: str = "Host", kind: str = "alias"
+) -> MagicMock:
     """Build an EntityAlias-like row."""
     row = MagicMock()
     row.id = uuid4()
     row.entity_id = entity_id
     row.alias = alias
+    row.kind = kind
     row.created_at = NOW
     row.updated_at = NOW
     row.deleted_at = None
@@ -110,11 +113,12 @@ def authorized(campaign: Campaign) -> Iterator[Authorized]:
     entity_repo.count_filtered.return_value = 0
     entity_repo.list_filtered.return_value = []
     alias_repo.create.side_effect = lambda **kw: make_alias_row(
-        kw["entity_id"], str(kw["alias"])
+        kw["entity_id"], str(kw["alias"]), str(kw.get("kind", "alias"))
     )
     alias_repo.get_by_entity.return_value = []
     alias_repo.get_by_alias.return_value = None
     alias_repo.soft_delete.return_value = True
+    alias_repo.rename.return_value = True
 
     app.dependency_overrides[get_current_campaign] = lambda: campaign
     app.dependency_overrides[get_entity_repo] = lambda: entity_repo
@@ -157,10 +161,12 @@ class TestEntityEndpoints:
 
         assert response.status_code == 201
         assert len(ctx.created) == 1
-        assert ctx.alias_repo.create.await_args.kwargs == {
-            "entity_id": ctx.created[0].id,
-            "alias": "Host",
-        }
+        # The name row is created first, then the requested alias.
+        created = [call.kwargs for call in ctx.alias_repo.create.await_args_list]
+        assert [row["alias"] for row in created] == ["Larkfellow", "Host"]
+        assert [
+            call.kwargs["kind"] for call in ctx.alias_repo.create.await_args_list
+        ] == ["name", "alias"]
 
     def test_get_entity_includes_aliases(self) -> None:
         """The read model carries the entity's aliases."""

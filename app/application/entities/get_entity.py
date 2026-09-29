@@ -29,6 +29,11 @@ async def get_entity_with_aliases(
     is stable. The response is built explicitly rather than validated from the
     ORM object, so a relationship left unloaded is an error here rather than a
     silent lazy load.
+
+    The list includes the entity's own name as a ``name`` row, because that is
+    how it is stored. Reporting it keeps the response honest about what is in the
+    table, and gives the client the ``kind`` it needs to tell a name from a real
+    alias. See ADR-027.
     """
     entity = await entity_repo.get_with(entity_id, "aliases")
     if not entity:

@@ -3,11 +3,17 @@
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, Index, String, Text
+from sqlalchemy import ForeignKey, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+
+#: The kinds of matchable term an entity can have. An entity always has exactly
+#: one ``name`` row, holding its current name, so that every string the matcher
+#: can recognise lives in this one table. See ADR-027.
+ALIAS_KIND_NAME = "name"
+ALIAS_KIND_ALIAS = "alias"
 
 if TYPE_CHECKING:
     # Imported for type checking only. At runtime the relationships reference
@@ -115,7 +121,19 @@ class Entity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class EntityAlias(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Alternative name used to identify an entity."""
+    """A name an entity is known by.
+
+    The entity's own name is stored here too, as the single row whose ``kind``
+    is ``name``. That makes this table the complete set of terms the matcher can
+    recognise, so the vocabulary is one read of one table rather than a union
+    over the entity and its aliases.
+
+    The price is an invariant rather than a query: an entity can no longer
+    contribute its name structurally, only because a ``name`` row exists. The
+    partial unique index below makes a *second* name row impossible, and
+    ``test_every_live_entity_has_exactly_one_live_name_alias`` asserts the
+    remaining half, that a name row exists at all.
+    """
 
     __tablename__ = "entity_aliases"
 
@@ -123,8 +141,23 @@ class EntityAlias(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         PGUUID(as_uuid=True), ForeignKey("entities.id"), nullable=False
     )
     alias: Mapped[str] = mapped_column(String(255), nullable=False)
+    kind: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+        server_default=ALIAS_KIND_ALIAS,
+    )
 
     __table_args__ = (
         Index("ix_entity_aliases_entity_id", "entity_id"),
         Index("uq_entity_aliases_entity_alias", "entity_id", "alias", unique=True),
+        # One live name row per entity. Soft deleted rows are excluded so a
+        # retcon can restore one without tripping the constraint.
+        Index(
+            "uq_entity_aliases_one_name",
+            "entity_id",
+            unique=True,
+            postgresql_where=text(
+                f"kind = '{ALIAS_KIND_NAME}' AND deleted_at IS NULL"
+            ),
+        ),
     )

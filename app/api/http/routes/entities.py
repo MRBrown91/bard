@@ -97,9 +97,10 @@ async def update_entity_endpoint(
     data: EntityUpdate,
     campaign: CurrentCampaign,
     entity_repo: Annotated[EntityRepository, Depends(get_entity_repo)],
+    alias_repo: Annotated[EntityAliasRepository, Depends(get_entity_alias_repo)],
 ) -> EntityRead:
     """Update entity base fields."""
-    return await update_entity(entity_id, data, entity_repo)
+    return await update_entity(entity_id, data, entity_repo, alias_repo)
 
 
 @router.delete(

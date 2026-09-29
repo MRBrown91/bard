@@ -9,6 +9,7 @@ from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.orm import aliased, selectinload
 
 from app.models import Entity, EntityAlias
+from app.models.entity.entity import ALIAS_KIND_NAME
 from app.repositories.base import BaseRepository
 from app.schemas.entity import EntityType
 
@@ -122,32 +123,23 @@ class EntityRepository(BaseRepository[Entity]):
     async def list_match_terms(self) -> list[MatchTerm]:
         """List every name and alias the matcher can recognize.
 
-        One term per name and one per alias, so an entity contributes its own
-        name whether or not it has aliases. Returns plain values rather than
-        ``Entity`` objects because the matcher compares strings and ids:
-        loading descriptions, timestamps, and the specializations it will never
-        read would make every transcript message pay for a full entity load.
+    One row per matchable term. An entity's own name is held in
+    ``entity_aliases`` as a ``name`` row, so this is a single join over one
+    table and ``is_alias`` is read off the row's kind rather than inferred
+    from which query produced it. See ADR-027.
 
-        Two queries rather than one outer join. A join cannot express "the
-        name, and also every alias": it returns one row per (entity, alias)
-        pair, so an entity that *has* an alias would contribute only its alias
-        and never its own name, and the more aliases an entity had the less
-        matchable it would become. Two scoped projections say exactly that.
-        """
-        names_stmt = self._campaign_scope(
-            self._active_scope(cast(Select[Any], select(Entity.id, Entity.name)))
-        )
-        name_rows = await self.session.execute(names_stmt)
-        terms = [
-            MatchTerm(entity_id=row.id, name=row.name, term=row.name, is_alias=False)
-            for row in name_rows
-        ]
-
-        alias_stmt = self._campaign_scope(
+    Returns plain values rather than ``Entity`` objects because the matcher
+    compares strings and ids: loading descriptions, timestamps, and the
+    specializations it will never read would make every transcript message
+    pay for a full entity load.
+    """
+        stmt = self._campaign_scope(
             self._active_scope(
                 cast(
                     Select[Any],
-                    select(Entity.id, Entity.name, EntityAlias.alias).join(
+                    select(
+                        Entity.id, Entity.name, EntityAlias.alias, EntityAlias.kind
+                    ).join(
                         EntityAlias,
                         and_(
                             EntityAlias.entity_id == Entity.id,
@@ -157,18 +149,17 @@ class EntityRepository(BaseRepository[Entity]):
                 )
             )
         )
-        alias_rows = await self.session.execute(alias_stmt)
-        terms.extend(
+        rows = await self.session.execute(stmt)
+        return [
             MatchTerm(
                 entity_id=row.id,
                 name=row.name,
                 term=row.alias,
-                is_alias=True,
+                is_alias=row.kind != ALIAS_KIND_NAME,
             )
-            for row in alias_rows
+            for row in rows
             if row.alias
-        )
-        return terms
+        ]
 
     async def find_by_name(self, name: str) -> Entity | None:
         stmt = self._active_scope(select(Entity).where(Entity.name == name))
@@ -206,11 +197,13 @@ class EntityRepository(BaseRepository[Entity]):
         return result.scalar_one_or_none()
 
     async def soft_delete_with_specializations(self, id: UUID) -> bool:
-        """Soft delete an entity together with its specialization.
+        """Soft delete an entity together with its specialization and name alias.
 
         Both rows are stamped in one transaction. Leaving a live specialization
         behind is unreachable through the API, because every specialized read
-        resolves the entity first, but it is still inconsistent state.
+        resolves the entity first, but it is still inconsistent state. The
+        natural name alias must be stamped the same way so the entity stops
+        being recognised while the rest remains for retcons.
         """
         entity = await self.get_with(id, *SPECIALIZATION_RELATIONSHIPS)
         if entity is None:
@@ -221,8 +214,31 @@ class EntityRepository(BaseRepository[Entity]):
             specialized = cast(Any, getattr(entity, relationship_name))
             if specialized is not None:
                 specialized.deleted_at = now
+
+        await self._stamp_name_aliases(id, now)
+
         await self.session.flush()
         return True
+
+    async def _stamp_name_aliases(self, id: UUID, now: datetime) -> None:
+        """Soft delete every live name row for an entity.
+
+        ``scalars().all()`` rather than ``scalar_one_or_none()``: the partial
+        unique index permits at most one *live* name row, but a rename that
+        collided with an existing alias before this constraint existed can leave
+        a soft-deleted one behind. Stamping all of them is both correct and
+        immune to that, where asking for exactly one would raise on a database
+        carrying legacy data.
+        """
+        stmt = self._active_scope(
+            select(EntityAlias).where(
+                EntityAlias.entity_id == id,
+                EntityAlias.kind == ALIAS_KIND_NAME,
+            )
+        )
+        result = await self.session.execute(stmt)
+        for alias_row in cast(Any, result).scalars().all():
+            cast(Any, alias_row).deleted_at = now
 
     async def list_filtered_with(
         self,
@@ -299,3 +315,29 @@ class EntityAliasRepository(BaseRepository[EntityAlias]):
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def get_name_alias(self, entity_id: UUID) -> EntityAlias | None:
+        """Get an entity's live natural name alias, if it has one."""
+        stmt = self._active_scope(
+            select(EntityAlias).where(
+                EntityAlias.entity_id == entity_id,
+                EntityAlias.kind == ALIAS_KIND_NAME,
+            )
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def rename(self, entity_id: UUID, name: str) -> bool:
+        """Point an entity's natural name alias at a new name.
+
+        Renaming the entity without moving this row would leave the entity
+        matchable only by a name it no longer has, so the two are updated
+        together. Returns False when there is no live name alias, which should
+        not happen but must not silently appear to succeed.
+        """
+        name_alias = await self.get_name_alias(entity_id)
+        if name_alias is None:
+            return False
+        name_alias.alias = name
+        await self.session.flush()
+        return True

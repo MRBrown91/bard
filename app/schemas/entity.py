@@ -105,9 +105,15 @@ class EntityAliasCreate(EntityAliasBase):
 
 
 class EntityAliasRead(EntityAliasBase, IDMixin, TimestampMixin, SoftDeleteMixin):
-    """Alias response."""
+    """Alias response.
+
+    ``kind`` is ``name`` for the entity's own name, which is held here as a row
+    so that every matchable term lives in one table, and ``alias`` for the rest.
+    A name row cannot be removed through the API; see ADR-027.
+    """
 
     entity_id: UUID
+    kind: str
 
     model_config = ConfigDict(from_attributes=True)
 

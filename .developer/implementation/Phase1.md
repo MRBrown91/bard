@@ -558,6 +558,46 @@ correct against mocked rows and wrong against the database. Mocking the
 repository bypassed the row-to-term mapping entirely, so the join's real shape
 was never exercised until a live probe with an entity that had an alias.
 
+### P1E.3 — Natural Name Alias
+
+**Status:** `Complete`
+
+**Goal:** Store every matchable term in one table, including the entity's own
+name, as groundwork for the SQL-side candidate generation planned in Phase 3
+("PostgreSQL full-text/fuzzy retrieval where useful").
+
+**Schema (ADR-027):** every matchable term now lives in `entity_aliases`. An
+entity's own name is a row there with `kind = 'name'`, so the vocabulary is one
+join instead of a union of two projections, and `is_alias` is read off the row's
+kind instead of being inferred from which query produced it.
+
+This is a storage change, not a behaviour change. The pipeline never learns
+where a term came from, so the tier table and every existing matching test pass
+unmodified: an exact name is still 1.0, an exact alias 0.95. Verified end to
+end against the live database — including that a renamed entity's old name
+falls to the distance-2 tier (0.7) rather than disappearing, because
+`"sela viper"` really is two edits from `"selina viper"`.
+
+**Why not for speed.** The union was never the cost; the trigram scan and
+`levenshtein()` calls are, and the join to `entities` is needed either way since
+`entity_aliases` has no `campaign_id`. This was chosen for comprehension — one
+table means "the strings that can match this entity" — and because it makes the
+pending SQL-side path single-table, which that decision needs.
+
+**The cost, accepted:** the name is now stored in two places and can drift, and
+an entity contributes its name because a row exists rather than because of how
+the query is written. That is an invariant across five write paths instead of a
+structural guarantee, so `uq_entity_aliases_one_name` (a partial unique index)
+makes a second name row impossible and
+`test_every_live_entity_has_exactly_one_live_name_alias` asserts existence.
+
+Write paths: `create_entity` writes the name row first; `update_entity`
+retargets it and refuses a rename onto an existing alias; `add_alias` refuses an
+alias equal to the name; `remove_alias` refuses a name row; soft delete stamps
+it alongside the specialization. A rename with no alias repository is a
+`ValidationError` rather than a half-applied write. `EntityAliasRead` exposes
+`kind`, so the API reports actual table state.
+
 ---
 
 ### P1E.2 — Entity Recognition API

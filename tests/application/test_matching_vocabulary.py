@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.entities.create_entity import add_alias, create_entity
 from app.application.entities.entity_matching import EntityMatcher
@@ -49,16 +50,31 @@ def make_entity(campaign_id: UUID, **overrides: object) -> MagicMock:
     return entity
 
 
-def make_alias(entity_id: UUID) -> MagicMock:
+def make_alias(
+    entity_id: UUID, alias: str = "The Viper", kind: str = "alias"
+) -> MagicMock:
     """An EntityAlias-like mock."""
     row = MagicMock()
     row.id = uuid4()
     row.entity_id = entity_id
-    row.alias = "The Viper"
+    row.alias = alias
+    row.kind = kind
     row.created_at = NOW
     row.updated_at = NOW
     row.deleted_at = None
     return row
+
+
+def alias_repo_for(entity_id: UUID) -> AsyncMock:
+    """A stubbed alias repository that reports a rename as successful."""
+    repo = AsyncMock(spec=EntityAliasRepository)
+    repo.get_by_alias.return_value = None
+    repo.create.side_effect = lambda **kw: make_alias(
+        kw["entity_id"], str(kw["alias"]), str(kw.get("kind", "alias"))
+    )
+    repo.rename.return_value = True
+    repo.session = AsyncMock(spec=AsyncSession)
+    return repo
 
 
 def repo_for(campaign_id: UUID | None, *terms: MatchTerm) -> AsyncMock:
@@ -198,9 +214,7 @@ class TestWritePathsInvalidate:
         campaign = uuid4()
         repo = repo_for(campaign)
         repo.get.return_value = make_entity(campaign)
-        aliases = AsyncMock(spec=EntityAliasRepository)
-        aliases.get_by_alias.return_value = None
-        aliases.create.return_value = make_alias(SELA)
+        aliases = alias_repo_for(SELA)
         await add_alias(SELA, EntityAliasCreate(alias="The Viper"), repo, aliases)
         assert MATCHING_VOCABULARIES.get(campaign) is None
 
@@ -211,7 +225,9 @@ class TestWritePathsInvalidate:
         campaign = uuid4()
         repo = repo_for(campaign)
         repo.update.return_value = make_entity(campaign, name="Selina")
-        await update_entity(SELA, EntityUpdate(name="Selina"), repo)
+        await update_entity(
+            SELA, EntityUpdate(name="Selina"), repo, alias_repo_for(SELA)
+        )
         assert MATCHING_VOCABULARIES.get(campaign) is None
 
     @pytest.mark.asyncio

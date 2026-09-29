@@ -198,6 +198,53 @@ unconstrained: the entity is inserted first and its specialization second,
 with no mutual dependency. `entity_facts` and `entity_relationship_facts` do
 carry their own `campaign_id` and are filtered by it directly.
 
+`entity_aliases` has no `campaign_id` of its own: an alias is reachable only
+through its parent entity, and campaign scope reaches it by joining `entities`.
+That is why any query over aliases must also filter the entity.
+
+## Entity aliases hold the entity's own name
+
+`entity_aliases.kind` distinguishes the two kinds of matchable term:
+
+| kind | meaning | exact | case-insensitive |
+|---|---|---|---|
+| `name` | the entity's own current name | 1.0 | 0.9 |
+| `alias` | an alternative name | 0.95 | 0.85 |
+
+An entity always has exactly one live `name` row, so `entity_aliases` is the
+complete set of strings the entity matcher can recognise and the vocabulary is a
+single join. See ADR-027 for why this is storage rather than behaviour, and for
+the costs accepted in exchange.
+
+Two constraints hold the shape:
+
+| index | columns | purpose |
+|---|---|---|
+| `uq_entity_aliases_entity_alias` | `(entity_id, alias)` unique | no duplicate term for one entity |
+| `uq_entity_aliases_one_name` | `(entity_id)` unique, partial on `kind = 'name' AND deleted_at IS NULL` | at most one live name row |
+
+The second is partial so that a soft-deleted name row does not block the
+creation or restoration of another. Nothing in the schema enforces that a name
+row *exists* — that is a cross-table invariant, so it is asserted by
+`test_every_live_entity_has_exactly_one_live_name_alias` rather than by a
+constraint.
+
+Consequences for writes, all of which are exercised in
+`tests/application/entities/test_entity_use_cases.py`:
+
+- `create_entity` writes the `name` row first, then the requested aliases.
+- `update_entity` retargets the `name` row on a rename. A rename onto an
+  existing alias is refused, since `(entity_id, alias)` is unique and the two
+  would otherwise collide.
+- `add_alias` refuses an alias equal to the entity's current name.
+- `remove_alias` refuses a `name` row. Removing it would leave an entity that
+  exists but can never be recognised by the name it is called; the caller is
+  told to rename instead.
+- Soft-deleting an entity stamps its `name` row in the same transaction as its
+  specialization, so a deleted entity stops being recognized while the row
+  remains for retcons. A restore must un-delete the `name` row in the same way;
+  no restore path exists yet.
+
 No foreign key uses `ON DELETE CASCADE`. Soft deletion is application-level
 and stamps `deleted_at` on the parent and its specialization in one
 transaction, preserving history for retcons (ADR-010).
