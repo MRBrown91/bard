@@ -888,7 +888,7 @@ so the open question was never whether, only when.
 **Why it is not an MVP blocker.** Every condition that would make it one is
 either absent or measured, and none of them is a correctness failure:
 
-- **Scale.** The current cost is a ~225 ms cold start at 11k terms, 2.7 ms warm,
+- **Scale.** The current cost is a ~225 ms cold start at 11k terms, 9.5 ms warm,
   and 45 ms at 110k. At one Uvicorn worker, a 225 ms first-call cost is paid once
   per campaign per process lifetime. The threshold where this hurts is
   campaigns large enough that the cold start is felt per restart — not reachable
@@ -999,3 +999,44 @@ future attempt to rely on it for isolation fails loudly rather than silently.
 - `rename` on the alias repository is unaffected: it resolves through
   `get_name_alias`, which is now scoped, and is only reachable after the use case
   has resolved the entity.
+
+## ADR-030: A filtered count is counted inside its subquery, never re-scoped outside
+
+**Context:** `FactRepository.count_filtered` (P1D.1) built its count as
+`select(func.count()).select_from(stmt.subquery())` and then wrapped that in
+`_campaign_scope(_active_scope(...))`. The filtered statement already carried
+both predicates, so the outer application was redundant in intent. It was not
+harmless: the outer `where` names `entity_facts.campaign_id`, and the only
+`from` element available at that point is the subquery, so SQLAlchemy added the
+fact table to the outer `from` with no join condition. The count became
+`|matching rows| x |rows in the campaign|`. A campaign with three facts
+reported nine.
+
+**Why the tests did not catch it.** The repository tests compile the statement
+and assert on its text, and the live probes used campaigns with exactly one
+matching row, where `n x 1 == n`. Both are structurally incapable of noticing
+this. SQLAlchemy's cartesian-product linter does detect it, but only when
+handed `linting=FROM_LINTING`, and only at execution — `compile()` alone stays
+silent, so asserting on a compiled statement misses it too.
+
+**Decision:** Apply the campaign and deletion scope inside the subquery and
+count that subquery directly. Do not re-apply a scope to a statement whose
+`from` is already fixed.
+
+- Both `FactRepository` and `RelationshipFactRepository` are fixed. The entity
+  fact repositories shipped this in P1D.1, so every paginated entity fact
+  response since then has reported an inflated `total` and `total_pages`. No
+  rows were wrong and no isolation was breached — the count was arithmetic, not
+  a read of someone else's data — so no cleanup is owed.
+- `tests/repositories/test_fact_repo.py::TestCountIsNotACartesianProduct`
+  asserts the shape rather than a number, because a mocked session cannot
+  produce a cartesian product: the outer statement must read exactly one `from`,
+  and each scope column must be stated exactly once. Both assertions were
+  confirmed to fail against the pre-fix code and pass after it.
+- The shape assertion, not a warning check, is the regression guard. A
+  warning-based test silently passed against the defect for as long as it was
+  written that way; a test that cannot fail against the bug it names is not
+  worth keeping.
+- Confirmed against the live database: a campaign with three relationship facts
+  and two entity facts now reports `count_filtered == list_filtered`, against
+  nine and four before.

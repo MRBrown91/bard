@@ -13,12 +13,12 @@ transition, so a state machine here would only be a guess that P1D.5 inherits.
 returning the column would advertise a state no read can produce.
 """
 
-from typing import Annotated
+from typing import Annotated, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.schemas.audience import FactAudienceRead
+from app.schemas.audience import FactAudienceRead, RelationshipFactAudienceRead
 from app.schemas.common import CampaignScopedMixin, IDMixin, TimestampMixin
 
 FACT_STATUSES = ("active", "invalidated", "superseded")
@@ -118,16 +118,43 @@ class EntityRelationshipFactBase(BaseModel):
 
 
 class EntityRelationshipFactCreate(EntityRelationshipFactBase):
-    """Create relationship fact request."""
+    """Create relationship fact request.
+
+    The two entity ids come from the body rather than the path, because a
+    relationship has no owning entity — it is a claim *between* two, and
+    nesting it under either would misstate that. Both are therefore validated by
+    the application layer against the caller's campaign, which is a stronger
+    requirement than the path form carries.
+
+    Self-reference is refused here as well as in the use case. It is a property
+    of the request shape, so it belongs at the boundary, and the use case check
+    remains for callers that are not going through HTTP.
+    """
 
     statement_id: UUID | None = None
     event_id: UUID | None = None
     source_entity_id: UUID
     target_entity_id: UUID
 
+    @model_validator(mode="after")
+    def _source_and_target_differ(self) -> Self:
+        if self.source_entity_id == self.target_entity_id:
+            raise ValueError(
+                "source_entity_id and target_entity_id must be different entities"
+            )
+        return self
+
 
 class EntityRelationshipFactUpdate(BaseModel):
-    """Update relationship fact request."""
+    """Update relationship fact request.
+
+    ``source_entity_id``, ``target_entity_id`` and ``relationship_type`` are all
+    absent, and ``extra="forbid"`` turns an attempt to send them into a 422
+    rather than a silent success. Repointing either end would rewrite the claim
+    from "A knows B" into "C knows B" without any trace, and reclassifying a
+    relationship in place would move it between extraction categories — the same
+    reasoning that makes ``fact_type`` immutable on an entity fact.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -148,6 +175,12 @@ class EntityRelationshipFactRead(
     event_id: UUID | None = None
     source_entity_id: UUID
     target_entity_id: UUID
+
+
+class EntityRelationshipFactWithAudiencesRead(EntityRelationshipFactRead):
+    """Relationship fact response including its audience rules."""
+
+    audiences: list[RelationshipFactAudienceRead] = Field(default_factory=list)
 
 
 class EntityRelationshipFactList(BaseModel):

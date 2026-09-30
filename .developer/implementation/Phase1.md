@@ -410,7 +410,7 @@ movement; campaign scoping of the audience tables through the parent fact.
 
 ### P1D.2 — Entity Relationship Fact CRUD API
 
-**Status:** `Planning`
+**Status:** `Complete`
 
 **Goal:** Manage atomic relationship claims between two entities.
 
@@ -418,20 +418,67 @@ movement; campaign scoping of the audience tables through the parent fact.
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/campaigns/{campaign_id}/relationship-facts` | Create relationship fact (source_entity_id, target_entity_id, relationship_type, content, confidence, importance, optional statement_id, event_id) |
-| GET | `/api/campaigns/{campaign_id}/relationship-facts` | List relationship facts (filter by source, target, type, status) |
+| GET | `/api/campaigns/{campaign_id}/relationship-facts` | List relationship facts (filter by source, target, type, status, event) |
 | GET | `/api/campaigns/{campaign_id}/relationship-facts/{fact_id}` | Get relationship fact with audiences |
 | PATCH | `/api/campaigns/{campaign_id}/relationship-facts/{fact_id}` | Update relationship fact |
 | DELETE | `/api/campaigns/{campaign_id}/relationship-facts/{fact_id}` | Soft delete relationship fact |
 
-**Audience Sub-resource:** Same pattern as entity facts.
+**Audience Sub-resource:** Same pattern as entity facts —
+`POST /{fact_id}/audiences`, `DELETE /{fact_id}/audiences/{audience_id}`.
 
-**Service:** `RelationshipFactService`
+**Use cases:** `app/application/facts/relationship_facts.py`. No
+`RelationshipFactService`; same reasoning that dropped `FactService` in P1D.1
+(there is no orchestration here for a class to hold).
 **Repository:** `RelationshipFactRepository`
-**Schemas:** `EntityRelationshipFactCreate`, `EntityRelationshipFactRead`, `EntityRelationshipFactUpdate`, `RelationshipFactAudienceCreate/Read`
+**Schemas:** `EntityRelationshipFactCreate`, `EntityRelationshipFactRead`,
+`EntityRelationshipFactUpdate`, `EntityRelationshipFactList`,
+`EntityRelationshipFactWithAudiencesRead`, `RelationshipFactAudienceCreate/Read`
 
-**Validation:** Source and target must be in same campaign; not same entity; `relationship_type` free text (convention: "owns", "knows", "serves", "parent_of", etc.)
+**Validation:** Source and target must be in same campaign; not same entity;
+`relationship_type` free text (convention: "owns", "knows", "serves",
+"parent_of", etc.)
 
-**Tests:** Cross-campaign prevention; self-reference prevention; provenance; visibility.
+**Campaign-level addressing, not nested.** A relationship is a claim *between*
+two entities and neither owns it, so `/entities/{id}/relationship-facts` would
+misstate that. The two entity ids therefore arrive in the request body, which
+makes the campaign check on both load-bearing rather than incidental: nothing in
+a path constrains them, and both columns are bare foreign keys with no campaign
+of their own, so the database will happily store a relationship between two
+entities of another campaign. Both are resolved through a campaign-scoped
+`EntityRepository` before the write.
+
+**Source and target filter independently, not as a direction pair.** One query
+answers "what points *at* this entity" and the other "what does it point at".
+P1D.3's traversal needs both readings, and separate filters let one query serve
+each. A combined direction-pair filter would answer neither question on its own.
+
+**A filtered list validates its entity filters; an unfiltered list does not.**
+Naming `source_entity_id` or `target_entity_id` in a query requires that entity
+to resolve in the caller's campaign, so a foreign id is a 404. Returning an
+empty page instead would be indistinguishable from a campaign with no such
+relationship, and would confirm nothing about the id either way — the weaker
+contract the document endpoints already rejected (ADR-011).
+
+**Both entity ids and `relationship_type` are immutable.** Repointing either
+end would silently rewrite "A knows B" as "C knows B" with no trace, and
+reclassifying would move a relationship between extraction categories — the same
+reasoning that makes `fact_type` immutable on an entity fact. Refused twice: the
+update schema omits them and `extra="forbid"` turns an attempt into a 422 rather
+than a silent success, and `RelationshipFactRepository.UPDATABLE_FIELDS` filters
+anything that arrives by another route.
+
+**Self-reference is refused at the schema as well as the use case.** It is a
+property of the request shape, so it belongs at the boundary; the use case check
+remains for callers not going through HTTP. A self-relationship is also
+meaningless as a claim, and would make every downstream traversal special-case a
+self-loop.
+
+**Tests:** `tests/api/test_relationship_facts.py` (54) and
+`tests/repositories/test_fact_repo.py`. Cross-campaign prevention for both ends;
+self-reference prevention; provenance scoping; audience pairing; immutability of
+both ends and of `relationship_type`; campaign scoping of the audience table
+through the parent fact; the `count_filtered`/`list_filtered` predicate
+agreement, including the cartesian-product regression below.
 
 ---
 

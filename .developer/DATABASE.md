@@ -202,6 +202,48 @@ carry their own `campaign_id` and are filtered by it directly.
 through its parent entity, and campaign scope reaches it by joining `entities`.
 That is why any query over aliases must also filter the entity.
 
+## `entity_relationship_facts` campaign scope is enforced in application, not by constraint
+
+The two entity columns on `entity_relationship_facts` are ordinary foreign keys
+to `entities.id`, and `entities.id` is globally unique. Nothing at the schema
+level requires `source_entity_id` and `target_entity_id` to belong to the same
+campaign as the relationship fact's own `campaign_id`, so the database will
+accept a fact whose two endpoints are entities of another campaign.
+
+This is deliberate rather than an oversight. A composite foreign key spanning
+`(source_entity_id, campaign_id)` and the matching pair for the target would
+express the rule declaratively, but it would add two more unique indexes to a
+table written once per extracted relationship, to enforce a property that only
+the application can establish anyway: the extractor has already resolved both
+entities from the campaign it is ingesting into. The same reasoning as ADR-029
+applies one level up — a constraint that only the application can satisfy is not
+worth the write cost, and a constraint that *could* be bypassed by a bulk load
+would not be trusted anyway.
+
+The enforcement is in `app/application/facts/relationship_facts.py`: both
+entities are resolved through a campaign-scoped `EntityRepository` before the
+write, so a cross-campaign relationship cannot be created through the API. A
+caller that reaches the repository directly is trusted, exactly as with every
+other repository in the project. Verified against the live database with two
+real campaigns.
+
+The audience table has the same shape and the same answer: no `campaign_id`,
+scope reached by joining a live parent fact
+(`RelationshipFactAudienceRepository`).
+
+**Both entity ids and `relationship_type` are immutable after creation.**
+Repointing an endpoint would rewrite a claim about two entities into a claim
+about different ones with nothing recording the change, and reclassifying would
+move a relationship between extraction categories. The update schema omits all
+three and forbids extra fields, so sending one is a 422 rather than a silent
+success, and `RelationshipFactRepository.UPDATABLE_FIELDS` filters anything
+reaching the repository by another route.
+
+**Self-referencing relationships are refused in the application,** not by a
+`CHECK` constraint. Following ADR-011 the enforcement is in the Pydantic schema
+and the use case rather than the database, because it is a rule about the shape
+of a request and not about a row's internal consistency.
+
 ## Entity aliases hold the entity's own name
 
 `entity_aliases.kind` distinguishes the two kinds of matchable term:

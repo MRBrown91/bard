@@ -42,6 +42,15 @@ def sql(session: AsyncMock) -> str:
     return str(captured(session).compile())
 
 
+def where_sql(session: AsyncMock) -> str:
+    """Return only the WHERE conditions of the executed statement.
+
+    The column list of a SELECT mentions every column regardless of the
+    filters, so a test asking "was this column filtered on?" has to look past it.
+    """
+    return sql(session).split("WHERE", 1)[1] if "WHERE" in sql(session) else ""
+
+
 def repo(session: AsyncMock, campaign_id: Any = None) -> FactRepository:
     """Build a fact repository."""
     return FactRepository(session, campaign_id or uuid4())
@@ -246,6 +255,194 @@ class TestFactUpdate:
         session = AsyncMock()
         session.execute.return_value = result_stub(scalar=None)
         assert await repo(session).update(uuid4(), content="x") is None
+
+
+class TestRelationshipFactFiltering:
+    """Filtering on the two ends of a relationship, added with P1D.2."""
+
+    async def test_source_and_target_filter_independently(self) -> None:
+        """Both readings of a relationship are reachable from one query.
+
+        A direction-pair filter would answer "who has a ``knows`` relationship
+        in either direction" but not "what points at this entity", which is the
+        question P1D.3's traversal actually asks.
+        """
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        await relationship_repo(session).list_filtered(source_entity_id=uuid4())
+        where = where_sql(session)
+        assert "entity_relationship_facts.source_entity_id" in where
+        assert "entity_relationship_facts.target_entity_id" not in where
+
+    async def test_target_filter_alone(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        await relationship_repo(session).list_filtered(target_entity_id=uuid4())
+        where = where_sql(session)
+        assert "entity_relationship_facts.target_entity_id" in where
+        assert "entity_relationship_facts.source_entity_id" not in where
+
+    async def test_filters_by_relationship_type(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        await relationship_repo(session).list_filtered(relationship_type="knows")
+        assert "entity_relationship_facts.relationship_type" in sql(session)
+
+    async def test_filters_by_provenance(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        await relationship_repo(session).list_filtered(statement_id=uuid4())
+        assert "entity_relationship_facts.statement_id" in sql(session)
+
+    async def test_unfiltered_list_is_still_scoped_and_live(self) -> None:
+        """No filters must not mean no campaign."""
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        await relationship_repo(session).list_filtered()
+        text = sql(session)
+        assert "entity_relationship_facts.campaign_id" in text
+        assert "entity_relationship_facts.deleted_at IS NULL" in text
+
+    async def test_orders_by_creation_then_id(self) -> None:
+        """``created_at`` alone is not unique, so the id breaks the tie."""
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        await relationship_repo(session).list_filtered()
+        assert "ORDER BY entity_relationship_facts.created_at" in sql(session)
+
+    async def test_count_and_page_agree_on_the_predicate(self) -> None:
+        """The total must describe the rows a client can page through.
+
+        Built from the same statement builder, so a filter cannot reach one and
+        miss the other.
+        """
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        statement_id = uuid4()
+        source_id = uuid4()
+        repository = relationship_repo(session)
+        await repository.list_filtered(
+            source_entity_id=source_id, status="active", statement_id=statement_id
+        )
+        await repository.count_filtered(
+            source_entity_id=source_id, status="active", statement_id=statement_id
+        )
+        listed = str(session.execute.await_args_list[0][0][0].compile())
+        counted = str(session.execute.await_args_list[1][0][0].compile())
+        for fragment in ("source_entity_id", "statement_id"):
+            assert fragment in listed, fragment
+            assert fragment in counted, fragment
+
+    async def test_count_still_applies_campaign_scope(self) -> None:
+        """The scope is carried by the subquery, which is what is counted."""
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        await relationship_repo(session).count_filtered()
+        assert "entity_relationship_facts.campaign_id" in sql(session)
+
+
+class TestCountIsNotACartesianProduct:
+    """The count must be the number of matching rows, not a multiple of it.
+
+    Reapplying the campaign scope to the outer count put the fact table into the
+    outer ``from`` beside the subquery with no join condition, so the database
+    returned ``matching_rows * campaign_rows``. A campaign with three facts
+    reported nine, and every ``total`` and ``total_pages`` above it was wrong.
+    Only one row per campaign hides it, which is what the earlier probes had.
+
+    These assert the shape rather than a number, because a mocked session cannot
+    produce a cartesian product to observe.
+    """
+
+    @staticmethod
+    def assert_one_from(statement: Select[Any]) -> None:
+        """The count must read exactly one thing: the subquery."""
+        froms = statement.get_final_froms()
+        assert len(froms) == 1, f"count reads {len(froms)} things: {froms}"
+
+    @staticmethod
+    def assert_scope_applied_once(statement: Select[Any], table: str) -> None:
+        """The scope belongs inside the subquery and nowhere else.
+
+        Applying it a second time in the outer ``where`` is what drags the table
+        into the outer ``from``. So each predicate must be stated once: the one
+        the filtered statement already carries.
+        """
+        text = str(statement.compile())
+        for column in (f"{table}.campaign_id", f"{table}.deleted_at"):
+            assert text.count(column) == 2, (
+                f"{column} appears {text.count(column)} times; the subquery "
+                f"contributes one select column and one predicate, and the outer "
+                f"query must add neither"
+            )
+
+    async def test_relationship_count_reads_one_table(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        await relationship_repo(session).count_filtered()
+        self.assert_one_from(captured(session))
+
+    async def test_entity_count_reads_one_table(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        await repo(session).count_filtered()
+        self.assert_one_from(captured(session))
+
+    async def test_relationship_count_states_the_scope_once(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        await relationship_repo(session).count_filtered()
+        self.assert_scope_applied_once(
+            captured(session), "entity_relationship_facts"
+        )
+
+    async def test_entity_count_states_the_scope_once(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        await repo(session).count_filtered()
+        self.assert_scope_applied_once(captured(session), "entity_facts")
+
+    async def test_a_filtered_count_is_also_a_single_read(self) -> None:
+        """Adding a filter must not push the count back to two tables."""
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        await relationship_repo(session).count_filtered(
+            source_entity_id=uuid4(), status="active"
+        )
+        self.assert_one_from(captured(session))
+        self.assert_scope_applied_once(
+            captured(session), "entity_relationship_facts"
+        )
+
+
+class TestRelationshipFactUpdate:
+    """The update allow-list, which is the last line of defence."""
+
+    def test_allows_the_mutable_fields(self) -> None:
+        assert RelationshipFactRepository.UPDATABLE_FIELDS == frozenset(
+            {"content", "confidence", "importance", "status"}
+        )
+
+    def test_forbids_the_two_entity_ids(self) -> None:
+        """Repointing an end would rewrite the claim without a trace."""
+        for field in ("source_entity_id", "target_entity_id"):
+            assert field not in RelationshipFactRepository.UPDATABLE_FIELDS, field
+
+    def test_forbids_reclassification_and_provenance(self) -> None:
+        for field in ("relationship_type", "statement_id", "event_id", "campaign_id"):
+            assert field not in RelationshipFactRepository.UPDATABLE_FIELDS, field
+
+    async def test_ignores_a_forbidden_field(self) -> None:
+        """Even bypassing the schema, the repository refuses to write it."""
+        session = AsyncMock()
+        session.execute.return_value = result_stub()
+        await relationship_repo(session).update(uuid4(), source_entity_id=uuid4())
+        session.flush.assert_not_awaited()
+
+    async def test_reports_a_missing_fact(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = result_stub(scalar=None)
+        assert await relationship_repo(session).update(uuid4(), content="x") is None
 
 
 class TestAudienceScope:

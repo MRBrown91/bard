@@ -10,6 +10,7 @@ from app.api.http.routes import (
     entity_recognition,
     facts,
     health,
+    relationship_facts,
 )
 from app.api.http.routes.specialized_entities import routers as specialized_routers
 from app.api.websocket import router as ws_router
@@ -30,6 +31,7 @@ app.include_router(campaigns.router)
 app.include_router(entities.router)
 app.include_router(documents.router)
 app.include_router(facts.router)
+app.include_router(relationship_facts.router)
 app.include_router(entity_recognition.router)
 for specialized_router in specialized_routers:
     app.include_router(specialized_router)

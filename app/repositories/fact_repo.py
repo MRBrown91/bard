@@ -116,7 +116,15 @@ class FactRepository(BaseRepository[EntityFact]):
         event_id: UUID | None = None,
         statement_id: UUID | None = None,
     ) -> int:
-        """Count the rows ``list_filtered`` would page through."""
+        """Count the rows ``list_filtered`` would page through.
+
+        The scope is counted inside the subquery, not reapplied outside it.
+        Reapplying it would name ``entity_facts.campaign_id`` in a ``where``
+        clause whose only ``from`` element is the subquery, which puts the fact
+        table into the outer ``from`` with no join condition. The count becomes
+        a cartesian product of the subquery and every fact in the campaign, so a
+        campaign with n matching facts reports n squared.
+        """
         stmt = self._filtered_stmt(
             entity_id=entity_id,
             status=status,
@@ -125,11 +133,7 @@ class FactRepository(BaseRepository[EntityFact]):
             statement_id=statement_id,
         )
         result = await self.session.execute(
-            self._campaign_scope(
-                self._active_scope(
-                    select(func.count()).select_from(stmt.subquery())
-                )
-            )
+            select(func.count()).select_from(stmt.subquery())
         )
         return result.scalar_one()
 
@@ -145,13 +149,75 @@ class FactRepository(BaseRepository[EntityFact]):
 class RelationshipFactRepository(BaseRepository[EntityRelationshipFact]):
     """Repository for EntityRelationshipFact operations.
 
-    Paging and filtering arrive with P1D.2; the reads here are the provenance
-    lookups P1D.4 and P1D.5 need.
+    Neither this repository nor ``FactAudienceRepository`` filters by audience.
+    The rules are stored and returned so a caller can see them; nothing here
+    decides whether a fact is visible to a player. That belongs at context
+    construction in Phase 2 (ADR-025).
     """
+
+    #: Fields a caller may change on an existing relationship fact. The two
+    #: entity ids are absent for the same reason ``entity_id`` is absent on
+    #: ``FactRepository``: they say *what the relationship is between*, and
+    #: repointing them would silently turn a claim about A and B into a claim
+    #: about C and B. ``relationship_type`` is absent because a relationship is
+    #: classified when it is extracted. The remainder is provenance and cannot
+    #: move either.
+    UPDATABLE_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {"content", "confidence", "importance", "status"}
+    )
 
     @property
     def model(self) -> type[EntityRelationshipFact]:
         return EntityRelationshipFact
+
+    async def update(
+        self, id: UUID, **kwargs: Any
+    ) -> EntityRelationshipFact | None:
+        """Update the mutable fields, ignoring anything not on the allow-list."""
+        changes = {k: v for k, v in kwargs.items() if k in self.UPDATABLE_FIELDS}
+        if not changes:
+            return await self.get(id)
+        return await super().update(id, **changes)
+
+    def _filtered_stmt(
+        self,
+        *,
+        source_entity_id: UUID | None = None,
+        target_entity_id: UUID | None = None,
+        relationship_type: str | None = None,
+        status: str | None = None,
+        event_id: UUID | None = None,
+        statement_id: UUID | None = None,
+    ) -> Select[EntityRelationshipFact]:
+        """Build the one predicate that both the page and the total use.
+
+        Source and target are filtered independently rather than as a
+        direction-pair, so a caller can ask for everything pointing *at* an
+        entity without also getting what it points at. Phase 1F needs both
+        readings of a relationship, and making them separate filters is what
+        lets one query serve each.
+        """
+        stmt = self._active_scope(select(EntityRelationshipFact))
+        stmt = self._campaign_scope(stmt)
+        if source_entity_id is not None:
+            stmt = stmt.where(
+                EntityRelationshipFact.source_entity_id == source_entity_id
+            )
+        if target_entity_id is not None:
+            stmt = stmt.where(
+                EntityRelationshipFact.target_entity_id == target_entity_id
+            )
+        if relationship_type is not None:
+            stmt = stmt.where(
+                EntityRelationshipFact.relationship_type == relationship_type
+            )
+        if status is not None:
+            stmt = stmt.where(EntityRelationshipFact.status == status)
+        if event_id is not None:
+            stmt = stmt.where(EntityRelationshipFact.event_id == event_id)
+        if statement_id is not None:
+            stmt = stmt.where(EntityRelationshipFact.statement_id == statement_id)
+        return stmt
 
     async def get_with_audiences(self, id: UUID) -> EntityRelationshipFact | None:
         """Get a relationship fact with its live audience rules loaded."""
@@ -164,6 +230,63 @@ class RelationshipFactRepository(BaseRepository[EntityRelationshipFact]):
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def list_filtered(
+        self,
+        *,
+        source_entity_id: UUID | None = None,
+        target_entity_id: UUID | None = None,
+        relationship_type: str | None = None,
+        status: str | None = None,
+        event_id: UUID | None = None,
+        statement_id: UUID | None = None,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> list[EntityRelationshipFact]:
+        """List relationship facts for a page, in a deterministic order."""
+        stmt = self._filtered_stmt(
+            source_entity_id=source_entity_id,
+            target_entity_id=target_entity_id,
+            relationship_type=relationship_type,
+            status=status,
+            event_id=event_id,
+            statement_id=statement_id,
+        )
+        stmt = stmt.order_by(
+            EntityRelationshipFact.created_at, EntityRelationshipFact.id
+        )
+        stmt = stmt.offset(offset).limit(limit)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def count_filtered(
+        self,
+        *,
+        source_entity_id: UUID | None = None,
+        target_entity_id: UUID | None = None,
+        relationship_type: str | None = None,
+        status: str | None = None,
+        event_id: UUID | None = None,
+        statement_id: UUID | None = None,
+    ) -> int:
+        """Count the rows ``list_filtered`` would page through.
+
+        The scope is counted inside the subquery, not reapplied outside it; see
+        ``FactRepository.count_filtered`` for why the outer reapplication turns
+        the count into a cartesian product.
+        """
+        stmt = self._filtered_stmt(
+            source_entity_id=source_entity_id,
+            target_entity_id=target_entity_id,
+            relationship_type=relationship_type,
+            status=status,
+            event_id=event_id,
+            statement_id=statement_id,
+        )
+        result = await self.session.execute(
+            select(func.count()).select_from(stmt.subquery())
+        )
+        return result.scalar_one()
 
     async def _where(
         self, criterion: ColumnElement[bool]

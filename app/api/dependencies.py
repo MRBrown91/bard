@@ -33,6 +33,7 @@ from app.repositories import (
     LocationRepository,
     PlayerCharacterRepository,
     PlayerRepository,
+    RelationshipFactAudienceRepository,
     RelationshipFactRepository,
     RelationshipRepository,
     SessionRepository,
@@ -148,6 +149,13 @@ async def get_relationship_fact_repo(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> RelationshipFactRepository:
     return RelationshipFactRepository(session, campaign.id)
+
+
+async def get_relationship_fact_audience_repo(
+    campaign: Annotated[Campaign, Depends(get_current_campaign)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> RelationshipFactAudienceRepository:
+    return RelationshipFactAudienceRepository(session, campaign.id)
 
 
 async def get_relationship_repo(
