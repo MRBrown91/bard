@@ -119,9 +119,18 @@ class DocumentStatementRepository(BaseRepository[DocumentStatement]):
 
     ``document_statements`` has no ``campaign_id``, so the base campaign scope
     is a silent no-op here. Isolation is inherited through the parent document,
-    which means every method that takes a bare ``document_id`` has to join to
+    which means every read and every inherited write has to join to
     ``documents`` to establish the caller's campaign. ``_document_scope`` is
-    that join, and it is used everywhere rather than relying on the base class.
+    that join, and it is applied by ``get``, ``exists`` and the shared
+    ``filtered_stmt`` rather than left to individual methods.
+
+    This is not redundant with the base class. ``BaseRepository.soft_delete``
+    and ``update`` resolve the row through ``get``, so without this override
+    they would stamp or edit a statement in any campaign, given only its id —
+    the method would report success while writing outside its scope. The
+    application layer also checks the parent document and compares
+    ``document_id`` before writing, so the defect was not reachable through the
+    API; this makes it unreachable through the repository too.
     """
 
     @property
@@ -147,6 +156,27 @@ class DocumentStatementRepository(BaseRepository[DocumentStatement]):
             ),
         ).where(Document.campaign_id == self.campaign_id)
 
+    async def get(self, id: UUID) -> DocumentStatement | None:
+        """Get one active statement whose document is in the scoped campaign.
+
+        Overrides the inherited version, which would apply no campaign scope at
+        all to a table without a ``campaign_id`` column. The two ``deleted_at``
+        predicates are both wanted: the statement's own, and its document's.
+        """
+        stmt: Select[Any] = self.filtered_stmt().where(DocumentStatement.id == id)
+        result = await self.session.execute(stmt)
+        return cast(DocumentStatement | None, result.scalar_one_or_none())
+
+    async def exists(self, id: UUID) -> bool:
+        """Check for an active statement under a document in this campaign.
+
+        Overridden for the same reason as ``get``: the inherited version builds
+        its own select and would resolve to a row in any campaign.
+        """
+        stmt: Select[Any] = self.filtered_stmt().where(DocumentStatement.id == id)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
     def filtered_stmt(self, document_id: UUID | None = None) -> Select[Any]:
         """Build the active, campaign-scoped statement select."""
         stmt = self._active_scope(select(DocumentStatement))
@@ -160,12 +190,6 @@ class DocumentStatementRepository(BaseRepository[DocumentStatement]):
         stmt = self.filtered_stmt(document_id).order_by(*STATEMENT_ORDER)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
-
-    async def get_scoped(self, id: UUID) -> DocumentStatement | None:
-        """Get one active statement that belongs to the scoped campaign."""
-        stmt = self.filtered_stmt().where(DocumentStatement.id == id)
-        result = await self.session.execute(stmt)
-        return cast(DocumentStatement | None, result.scalar_one_or_none())
 
     async def count_by_document(self, document_id: UUID) -> int:
         """Count the active statements of a document."""

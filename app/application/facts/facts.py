@@ -91,7 +91,7 @@ async def _validate_provenance(
     so an unscoped repository cannot satisfy the check.
     """
     if data.statement_id is not None:
-        statement = await statement_repo.get_scoped(data.statement_id)
+        statement = await statement_repo.get(data.statement_id)
         if statement is None:
             raise ValidationError(
                 "Invalid statement_id", {"statement_id": str(data.statement_id)}

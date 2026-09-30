@@ -20,6 +20,7 @@ from app.repositories.document_repo import (
     DocumentRepository,
     DocumentStatementRepository,
 )
+from app.repositories.entity_repo import EntityAliasRepository
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -53,6 +54,24 @@ def statements(
 ) -> DocumentStatementRepository:
     """Build a statement repository."""
     return DocumentStatementRepository(session, campaign_id or uuid4())
+
+
+def aliases(session: AsyncMock, campaign_id: Any = None) -> EntityAliasRepository:
+    """Build an alias repository, the other table that inherits its scope."""
+    return EntityAliasRepository(session, campaign_id or uuid4())
+
+
+def create_capture_session() -> MagicMock:
+    """A session that records ``add`` calls without executing anything.
+
+    ``BaseRepository.create`` adds then flushes. ``add`` is synchronous and
+    ``flush`` is not, so this keeps ``add`` a real MagicMock call that can be
+    counted and left ``flush`` awaitable.
+    """
+    session = MagicMock()
+    session.flush = AsyncMock()
+    session.execute = AsyncMock(return_value=result_stub())
+    return session
 
 
 def document_with_statements(count: int = 2) -> Document:
@@ -154,7 +173,7 @@ class TestStatementScoping:
         "call",
         [
             pytest.param(lambda r, s: r.get_by_document(s), id="get_by_document"),
-            pytest.param(lambda r, s: r.get_scoped(s), id="get_scoped"),
+            pytest.param(lambda r, s: r.get(s), id="get"),
             pytest.param(lambda r, s: r.count_by_document(s), id="count_by_document"),
             pytest.param(
                 lambda r, s: r.list_filtered(document_id=s), id="list_filtered"
@@ -190,7 +209,7 @@ class TestStatementScoping:
         """A statement whose document is deleted is not reachable through it."""
         session = AsyncMock()
         session.execute.return_value = result_stub()
-        await statements(session).get_scoped(uuid4())
+        await statements(session).get(uuid4())
         statement = str(captured(session).compile())
         assert statement.count("deleted_at IS NULL") == 2
 
@@ -285,3 +304,116 @@ class TestRetainedHistory:
         session.execute.return_value = result_stub(rows)
         result = await statements(session).get_by_document(uuid4())
         assert [r.content for r in result] == ["b", "a"]
+
+
+class TestChildTableWriteScoping:
+    """A table without ``campaign_id`` must scope its own writes.
+
+    ``BaseRepository.soft_delete`` and ``update`` resolve the row through
+    ``get``, and the base ``_campaign_scope`` is a silent no-op for
+    ``document_statements`` and ``entity_aliases``. Before this was overridden,
+    both would stamp or edit a row in any campaign given only its id while
+    reporting success. The API was not reachable — the use cases resolve the
+    parent first and compare the parent id — so this is about the repository
+    being safe on its own terms rather than depending on every caller.
+
+    ``create`` remains genuinely unscoped and is asserted as such below: it
+    inserts whatever parent id it is handed, so the use cases must resolve the
+    document before calling it.
+    """
+
+    async def test_soft_delete_joins_the_parent_campaign(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = result_stub(scalar=None)
+        assert await statements(session).soft_delete(uuid4()) is False
+        assert "JOIN documents" in sql(session)
+
+    async def test_soft_delete_reports_failure_for_a_foreign_statement(
+        self,
+    ) -> None:
+        """The defect, stated as behaviour: it used to return True here."""
+        session = AsyncMock()
+        session.execute.return_value = result_stub(scalar=None)
+        assert await statements(session).soft_delete(uuid4()) is False
+
+    async def test_get_joins_the_parent_campaign(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = result_stub(scalar=None)
+        await statements(session).get(uuid4())
+        statement = sql(session)
+        assert "JOIN documents" in statement
+        assert "documents.campaign_id" in statement
+
+    async def test_get_requires_both_deletion_predicates(self) -> None:
+        """The statement's own, and its document's."""
+        session = AsyncMock()
+        session.execute.return_value = result_stub(scalar=None)
+        await statements(session).get(uuid4())
+        assert str(captured(session).compile()).count("deleted_at IS NULL") == 2
+
+    async def test_exists_joins_the_parent_campaign(self) -> None:
+        """The inherited exists() builds its own select and needs the same fix."""
+        session = AsyncMock()
+        session.execute.return_value = result_stub(scalar=None)
+        assert await statements(session).exists(uuid4()) is False
+        assert "JOIN documents" in sql(session)
+
+    async def test_alias_get_joins_the_parent_campaign(self) -> None:
+        """Same override on EntityAliasRepository, for the same reason."""
+        session = AsyncMock()
+        session.execute.return_value = result_stub(scalar=None)
+        await aliases(session).get(uuid4())
+        statement = sql(session)
+        assert "JOIN entities" in statement
+        assert "entities.campaign_id" in statement
+
+    async def test_alias_soft_delete_joins_the_parent_campaign(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = result_stub(scalar=None)
+        assert await aliases(session).soft_delete(uuid4()) is False
+        assert "JOIN entities" in sql(session)
+
+    async def test_alias_get_by_alias_joins_the_parent_campaign(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = result_stub(scalar=None)
+        await aliases(session).get_by_alias(uuid4(), "Larkfellow")
+        assert "entities.campaign_id" in sql(session)
+
+    async def test_alias_get_name_alias_joins_the_parent_campaign(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = result_stub(scalar=None)
+        await aliases(session).get_name_alias(uuid4())
+        assert "entities.campaign_id" in sql(session)
+
+    async def test_create_is_still_unscoped(self) -> None:
+        """Documented, not fixed: there is no campaign column to scope it.
+
+        The use cases resolve the parent before calling create, and this test
+        exists so that a future attempt to rely on create for isolation fails
+        loudly here rather than silently in another campaign.
+        """
+        session = create_capture_session()
+        await statements(session).create(
+            document_id=uuid4(), position=0, content="x"
+        )
+        session.execute.assert_not_awaited()
+        assert session.add.call_count == 1
+
+
+class TestStatementCreateKeepsPositionVerbatim:
+    """Position is not normalised or de-duplicated on the way in."""
+
+    async def test_preserves_a_duplicate_position(self) -> None:
+        session = create_capture_session()
+        statement = await statements(session).create(
+            document_id=uuid4(), position=3, content="x"
+        )
+        assert statement.position == 3
+        assert session.add.call_count == 1
+
+    async def test_preserves_a_negative_position(self) -> None:
+        session = create_capture_session()
+        statement = await statements(session).create(
+            document_id=uuid4(), position=-2, content="x"
+        )
+        assert statement.position == -2

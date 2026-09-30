@@ -332,6 +332,16 @@ requires `documents.deleted_at IS NULL`, so a statement under a deleted document
 is unreachable. The generic repository campaign scope cannot do this on its own,
 because it is a no-op for a table without that column.
 
+That no-op makes it the repository's job, not the caller's, and this includes
+the methods inherited from `BaseRepository` (ADR-029). `soft_delete` and `update`
+resolve the row through `get`, so an unscoped `get` on this table would stamp or
+edit a statement in any campaign given only its id while reporting success.
+`DocumentStatementRepository` therefore overrides `get` and `exists` to apply the
+parent join, and every read of a statement carries two deletion predicates: the
+statement's own and its document's. `create` is left unscoped and is documented as
+such, because the insert has no row to scope against — the application layer
+resolves the document first instead. The same applies to `entity_aliases`.
+
 ## EntityFact
 
 ```text

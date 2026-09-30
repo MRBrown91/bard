@@ -928,3 +928,74 @@ either absent or measured, and none of them is a correctness failure:
   large enough for the 225 ms cold start to be felt, that is the trigger to pull
   P3.1 forward — but it is a trigger, not a reason to build it speculatively
   during Phase 1.
+
+## ADR-029: A child table that inherits its campaign scope must scope its own `get`
+
+**Context:** `BaseRepository._campaign_scope` is a silent no-op for a model
+without a `campaign_id` column, which is how `document_statements` and
+`entity_aliases` inherit isolation through a parent. That no-op is correct for
+the hand-written reads: `DocumentStatementRepository.get_scoped` and
+`EntityAliasRepository.get_by_alias` both join to the parent and filter on its
+campaign, and ADR-022 added those joins deliberately.
+
+The gap was the *inherited* methods. `soft_delete`, `update`, `exists` and `get`
+all live in `BaseRepository` and were written before these two tables existed.
+`soft_delete` and `update` resolve the row through `self.get(id)`, so on a child
+table they executed a bare `SELECT ... WHERE id = :id` with no join at all. Given
+only an id, they would stamp or edit a row in another campaign and return
+`True`/`True` while doing it. `EntityAliasRepository` overrode `get` but left it
+unscoped, and `DocumentStatementRepository` did not override it, so it also
+inherited the base version. The `_campaign_scope` no-op was documented as
+deliberate; the consequence for inherited writes was not.
+
+**Not reachable through the API, but reachable through the repository.** Every
+current call site guards the write by resolving the parent first through a
+campaign-scoped repository and comparing the parent id — `remove_alias` checks
+`alias.entity_id == entity_id` after a scoped `entity_repo.get`, and
+`delete_statement` does the same with `document_id`. So no route could cross the
+boundary. The defect was that the safety depended on that convention holding at
+every call site forever, in a method whose signature promises nothing about the
+parent.
+
+**Decision:** Override `get` and `exists` on both child repositories to apply the
+parent join, so campaign scoping on these tables is a property of the
+repository rather than of its callers.
+
+**Why the inherited version is the right thing to fix.** Making the *callers*
+more careful would have left the trap in place for the next person, and the
+failure mode is the dangerous combination: a method that reports success while
+writing outside its scope. The structural test in `test_no_undeleted_reads.py`
+checks that reads filter `deleted_at`, but nothing checked that a write resolves
+within the campaign — the deletion filter and the campaign scope are different
+properties, and only the first was asserted.
+
+`create` is deliberately left unscoped and is asserted as such. It inserts
+whatever parent id it is handed, because there is no campaign column to
+constrain it, and the fix for that is at the use case, not the repository: the
+insert is not a read of the parent, so there is no row to scope against. The
+`TestChildTableWriteScoping::test_create_is_still_unscoped` test exists so that a
+future attempt to rely on it for isolation fails loudly rather than silently.
+
+**Consequences:**
+- `DocumentStatementRepository.get_scoped` is removed rather than kept alongside
+  the new `get`. Two names for one behaviour is the kind of split that let the
+  unscoped one be used by accident; the call sites in `facts.py` and the
+  statement use cases now call `get`, and they are genuinely scoped.
+- Every `DocumentStatement` and `EntityAlias` read now applies two deletion
+  predicates — the child's own and the parent's. That is correct and intended: a
+  statement under a deleted document is not reachable, and an alias of a deleted
+  entity is not either.
+- `tests/repositories/test_document_repo.py::TestChildTableWriteScoping` asserts
+  the join on `get`, `exists` and `soft_delete` for both tables, and the
+  two-deletion-predicate requirement. It asserts compiled SQL, because that is
+  the layer at which the defect lived.
+- Verified against the live database with two real campaigns, not only against
+  compiled statements: a repository scoped to the wrong campaign now returns
+  `None`/`False` from `get`, `exists`, `soft_delete` and `update`, and the target
+  rows are confirmed unstamped and unedited afterwards. The owner can still write,
+  so the join is not simply blocking everything. The probe was re-run with the
+  override removed and it failed on exactly the two checks it should, so it does
+  detect the defect rather than passing vacuously.
+- `rename` on the alias repository is unaffected: it resolves through
+  `get_name_alias`, which is now scoped, and is only reachable after the use case
+  has resolved the entity.

@@ -282,50 +282,98 @@ class EntityRepository(BaseRepository[Entity]):
 class EntityAliasRepository(BaseRepository[EntityAlias]):
     """Repository for EntityAlias operations.
 
-    Aliases are not directly campaign-scoped (they inherit isolation through
-    their parent entity), so callers must verify the parent entity belongs to
-    the caller's campaign before using an alias.
+    Aliases are not directly campaign-scoped: they inherit isolation through
+    their parent entity. The base ``_campaign_scope`` is therefore a silent
+    no-op, so ``_entity_scope`` applies the join to ``entities`` and every read
+    and inherited write goes through it.
+
+    This is not belt-and-braces. ``BaseRepository.soft_delete`` and ``update``
+    resolve the row through ``get``, so an unscoped ``get`` lets either stamp or
+    edit an alias in another campaign given only its id, while reporting
+    success. The application layer guards every current call site by resolving
+    the parent entity first, so the defect was not reachable through the API;
+    overriding ``get`` makes it unreachable through the repository as well.
     """
 
     @property
     def model(self) -> type[EntityAlias]:
         return EntityAlias
 
+    def _entity_scope(self, stmt: Select[Any]) -> Select[Any]:
+        """Join the parent entity and apply both scopes.
+
+        The join also excludes aliases of a soft-deleted entity, so those rows
+        are not reachable by id. The entity's own deletion predicate belongs in
+        the join condition; in a where clause it would make the join outer and
+        let them back in.
+        """
+        if self.campaign_id is None:
+            return stmt
+        return stmt.join(
+            Entity,
+            and_(
+                Entity.id == EntityAlias.entity_id,
+                Entity.deleted_at.is_(None),
+            ),
+        ).where(Entity.campaign_id == self.campaign_id)
+
+    def filtered_stmt(self, entity_id: UUID | None = None) -> Select[Any]:
+        """Build the active, campaign-scoped alias select.
+
+        Public so ``filtered_stmt`` on this repository and the one on
+        ``DocumentStatementRepository`` mean the same thing: the campaign-scoped
+        predicate for a table that inherits its scope through a parent.
+        """
+        stmt = self._active_scope(select(EntityAlias))
+        stmt = self._entity_scope(stmt)
+        if entity_id is not None:
+            stmt = stmt.where(EntityAlias.entity_id == entity_id)
+        return stmt
+
     async def get(self, id: UUID) -> EntityAlias | None:
-        """Get a non-deleted alias by ID."""
-        stmt = self._active_scope(select(EntityAlias).where(EntityAlias.id == id))
+        """Get one active alias whose entity is in the scoped campaign.
+
+        Overrides the inherited version, which applies no campaign scope to a
+        table without a ``campaign_id`` column. Both ``deleted_at`` predicates
+        are wanted: the alias's own, and its entity's.
+        """
+        stmt: Select[Any] = self.filtered_stmt().where(EntityAlias.id == id)
         result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
+        return cast(EntityAlias | None, result.scalar_one_or_none())
+
+    async def exists(self, id: UUID) -> bool:
+        """Check for an active alias under an entity in this campaign.
+
+        Overridden because the inherited version builds its own select and
+        would resolve to a row in any campaign.
+        """
+        stmt: Select[Any] = self.filtered_stmt().where(EntityAlias.id == id)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none() is not None
 
     async def get_by_entity(self, entity_id: UUID) -> list[EntityAlias]:
-        """Get all active aliases for an entity."""
-        stmt = self._active_scope(
-            select(EntityAlias).where(EntityAlias.entity_id == entity_id)
-        )
-        result = await self.session.execute(stmt.order_by(EntityAlias.alias))
+        """Get all active aliases for an entity in the scoped campaign."""
+        stmt = self.filtered_stmt(entity_id).order_by(EntityAlias.alias)
+        result = await self.session.execute(stmt)
         return cast(list[EntityAlias], list(result.scalars().all()))
 
-    async def get_by_alias(self, entity_id: UUID, alias: str) -> EntityAlias | None:
-        """Get alias by entity_id and alias string."""
-        stmt = self._active_scope(
-            select(EntityAlias).where(
-                EntityAlias.entity_id == entity_id,
-                EntityAlias.alias == alias,
-            )
+    async def get_by_alias(
+        self, entity_id: UUID, alias: str
+    ) -> EntityAlias | None:
+        """Get an alias by entity id and string, within the scoped campaign."""
+        stmt: Select[Any] = self.filtered_stmt(entity_id).where(
+            EntityAlias.alias == alias
         )
         result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
+        return cast(EntityAlias | None, result.scalar_one_or_none())
 
     async def get_name_alias(self, entity_id: UUID) -> EntityAlias | None:
         """Get an entity's live natural name alias, if it has one."""
-        stmt = self._active_scope(
-            select(EntityAlias).where(
-                EntityAlias.entity_id == entity_id,
-                EntityAlias.kind == ALIAS_KIND_NAME,
-            )
+        stmt: Select[Any] = self.filtered_stmt(entity_id).where(
+            EntityAlias.kind == ALIAS_KIND_NAME
         )
         result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
+        return cast(EntityAlias | None, result.scalar_one_or_none())
 
     async def rename(self, entity_id: UUID, name: str) -> bool:
         """Point an entity's natural name alias at a new name.

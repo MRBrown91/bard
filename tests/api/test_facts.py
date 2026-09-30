@@ -284,16 +284,16 @@ class TestProvenance:
         with authorized() as h:
             h.facts.create.return_value = make_fact(h.campaign, h.entity)
             statement_id = uuid4()
-            h.statements.get_scoped.return_value = object()
+            h.statements.get.return_value = object()
             response = h.client.post(
                 h.url, json={**CREATE_BODY, "statement_id": str(statement_id)}
             )
             assert response.status_code == 201
-            h.statements.get_scoped.assert_awaited_once_with(statement_id)
+            h.statements.get.assert_awaited_once_with(statement_id)
 
     def test_rejects_a_missing_statement(self) -> None:
         with authorized() as h:
-            h.statements.get_scoped.return_value = None
+            h.statements.get.return_value = None
             response = h.client.post(
                 h.url, json={**CREATE_BODY, "statement_id": str(uuid4())}
             )
@@ -317,7 +317,7 @@ class TestProvenance:
         are what have to match.
         """
         with authorized() as h:
-            h.statements.get_scoped.return_value = None
+            h.statements.get.return_value = None
             absent = h.client.post(
                 h.url, json={**CREATE_BODY, "statement_id": str(uuid4())}
             )
@@ -333,7 +333,7 @@ class TestProvenance:
             h.facts.create.return_value = make_fact(h.campaign, h.entity)
             response = h.client.post(h.url, json=CREATE_BODY)
             assert response.status_code == 201
-            h.statements.get_scoped.assert_not_awaited()
+            h.statements.get.assert_not_awaited()
             h.events.get.assert_not_awaited()
 
 
