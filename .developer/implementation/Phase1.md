@@ -268,7 +268,7 @@ Two rules earned their tests through live-database failures that the mocked test
 
 ### P1C.2 — Document Statement API
 
-**Status:** `Approved`
+**Status:** `Complete`
 
 **Goal:** Atomic statement management within documents.
 
@@ -282,7 +282,40 @@ Two rules earned their tests through live-database failures that the mocked test
 
 **Note:** Statements are the provenance anchors for facts. Position enables ordered reconstruction.
 
-**Tests:** Position ordering; cascade soft delete with document.
+**Files:**
+- `app/application/documents/statements.py` — the five use cases
+- `app/api/http/routes/documents.py` — five routes nested under the document
+- `app/schemas/document.py` — schemas, written in P1C.1, unchanged here
+
+The repository and schemas already existed from P1C.1; this step is the
+application layer and the routes. `get_scoped` is gone, folded into `get`, which
+is documented under ADR-029 — the fix was needed because the inherited
+`soft_delete` was not campaign-scoped for this table.
+
+**The write path establishes its own isolation.** `document_statements` has no
+`campaign_id`, so nothing scopes an insert: the foreign key proves the document
+exists, not that it is the caller's. Every use case resolves the document through
+`DocumentRepository` first, so a cross-campaign document is a 404 and the insert
+never runs. Reads were already safe via the repository's join; writes were not.
+
+**Both ids in the path are checked against the row.** A statement id from another
+document in the same campaign is a 404 rather than a record, because
+`document_id` and `statement_id` address one resource and a mismatch would
+otherwise be invisible. Same reasoning for the list: a document the caller cannot
+see is a 404, not an empty page, since an empty list is indistinguishable from a
+document with no statements.
+
+**`position` is caller-supplied and unvalidated against ties.** The schema
+permits duplicates because curated ordering is meaningful (see DATABASE.md), and
+negatives are accepted because they still order. `PATCH` refuses blank content
+while `POST` accepts it, which is a deliberate asymmetry: blanking an existing
+statement corrupts a citation that facts already point at, whereas creating one
+has no citation to break.
+
+**Tests:** 34 API tests, plus repository coverage. Ordering, the document-mismatch
+404, cross-campaign refusal on every verb, and the paging bounds are all covered.
+The cross-campaign cases are the point: they are what a mocked repository cannot
+prove, since a stub returns whatever it is told.
 
 ---
 
