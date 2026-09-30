@@ -210,18 +210,38 @@ class TestCreate:
             assert response.status_code == 201
             assert response.json()["position"] == -5
 
-    def test_accepts_a_blank_content(self) -> None:
-        """Creation keeps the schema's rules; only updates refuse blank text.
+    def test_refuses_a_blank_content(self) -> None:
+        """Create and update agree: neither stores an empty anchor.
 
-        Symmetric validation would be tidier, but blank content is refused on
-        update because that is where it silently corrupts an existing
-        citation, and the two paths should not disagree about what is
-        storable.
+        A statement is what a fact cites, so a blank one is not a lesser
+        statement, it is an unverifiable citation. Refusing it on update only
+        would leave a hole, since a caller could POST one and then PATCH it.
         """
         with authorized() as h:
-            blank = make_statement(h.document_id, content=" ")
-            h.statements.create.return_value = blank
             response = h.client.post(h.url, json={**BODY, "content": " "})
+            assert response.status_code == 422
+            h.statements.create.assert_not_awaited()
+
+    def test_refuses_an_empty_content(self) -> None:
+        """The schema rejects "" before the use case is reached."""
+        with authorized() as h:
+            response = h.client.post(h.url, json={**BODY, "content": ""})
+            assert response.status_code == 422
+            h.statements.create.assert_not_awaited()
+
+    def test_accepts_content_with_surrounding_whitespace(self) -> None:
+        """Padding around real text is preserved, not stripped away.
+
+        The check asks whether the content is *meaningfully* empty. Rewriting
+        the caller's text would be a different decision, and the statement is
+        provenance that should read as submitted.
+        """
+        with authorized() as h:
+            padded = make_statement(h.document_id, content="  The ford holds.  ")
+            h.statements.create.return_value = padded
+            response = h.client.post(
+                h.url, json={**BODY, "content": "  The ford holds.  "}
+            )
             assert response.status_code == 201
 
 
@@ -361,6 +381,29 @@ class TestUpdate:
             response = h.client.patch(f"{h.url}/{row.id}", json={"content": "   "})
             assert response.status_code == 422
             assert row.content == "The road forks at Kettle Ford."
+
+    def test_refuses_an_empty_content(self) -> None:
+        with authorized() as h:
+            row = make_statement(h.document_id)
+            h.statements.get.return_value = row
+            response = h.client.patch(f"{h.url}/{row.id}", json={"content": ""})
+            assert response.status_code == 422
+            assert row.content == "The road forks at Kettle Ford."
+
+    def test_patching_only_the_position_still_succeeds(self) -> None:
+        """The content rule must not fire when content is not being sent.
+
+        A use case that validated the whole model instead of the fields it is
+        about to write would reject a reorder whenever the *stored* text
+        happened to be blank, which is exactly the sort of surprise a
+        provenance endpoint should not have.
+        """
+        with authorized() as h:
+            row = make_statement(h.document_id, content="   ")
+            h.statements.get.return_value = row
+            response = h.client.patch(f"{h.url}/{row.id}", json={"position": 4})
+            assert response.status_code == 200
+            assert row.position == 4
 
     def test_rejects_moving_the_statement_to_another_document(self) -> None:
         """Provenance is the point; a statement cannot change its source."""

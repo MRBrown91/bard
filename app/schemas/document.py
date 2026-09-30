@@ -87,11 +87,23 @@ class DocumentFilter(BaseModel):
     session_id: UUID | None = None
 
 
+# Statement content is provenance: a fact cites the statement it was extracted
+# from, so an empty one makes that citation unverifiable. min_length rejects ""
+# at the schema boundary and the strip check in the use case rejects whitespace,
+# which is not empty but carries no more provenance than an empty string does.
+# Both apply to create and update alike. An earlier version enforced this only on
+# update, reasoning that blanking a live citation is worse than creating a
+# useless one; the asymmetry was a hole in the guarantee rather than a
+# considered distinction, since nothing stopped a caller from POSTing a blank
+# statement and then PATCHing it into a citation.
+StatementContent = Annotated[str, Field(min_length=1)]
+
+
 class DocumentStatementBase(BaseModel):
     """Base document statement fields."""
 
     position: int
-    content: str
+    content: StatementContent
 
 
 class DocumentStatementCreate(DocumentStatementBase):
@@ -111,7 +123,7 @@ class DocumentStatementUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     position: int | None = None
-    content: str | None = None
+    content: StatementContent | None = None
 
 
 class DocumentStatementRead(DocumentStatementBase, IDMixin, TimestampMixin):

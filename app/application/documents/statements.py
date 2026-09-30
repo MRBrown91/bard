@@ -48,6 +48,20 @@ def _document_not_found(document_id: UUID) -> NotFoundError:
     return NotFoundError("Document not found", {"document_id": str(document_id)})
 
 
+def _require_content(content: str | None) -> None:
+    """Refuse blank statement content on create and update alike.
+
+    An empty anchor is not provenance: facts cite the statement they were
+    extracted from, and a blank one makes the citation unverifiable. ``""`` is
+    already rejected by the schema's ``min_length=1``; this catches whitespace,
+    which is not empty but carries no more meaning. Applied to both paths
+    deliberately — a caller must not be able to create a blank statement and
+    then patch it into a citation.
+    """
+    if content is not None and not content.strip():
+        raise ValidationError("Statement content cannot be blank", {"content": content})
+
+
 async def _require_document(
     document_id: UUID,
     document_repo: DocumentRepository,
@@ -79,6 +93,7 @@ async def create_statement(
     next position, and can ask the list endpoint what the current maximum is.
     """
     await _require_document(document_id, document_repo)
+    _require_content(data.content)
     statement = await statement_repo.create(
         document_id=document_id,
         position=data.position,
@@ -159,13 +174,7 @@ async def update_statement(
         raise _statement_not_found(statement_id)
 
     changes = data.model_dump(exclude_unset=True)
-    if "content" in changes and not changes["content"].strip():
-        # A blank anchor is not provenance. Facts cite a statement, and an
-        # empty one makes the citation unverifiable, so this is refused at the
-        # boundary rather than left for a fact to discover later.
-        raise ValidationError(
-            "Statement content cannot be blank", {"statement_id": str(statement_id)}
-        )
+    _require_content(changes.get("content"))
     for field, value in changes.items():
         setattr(statement, field, value)
 

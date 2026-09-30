@@ -307,15 +307,23 @@ document with no statements.
 
 **`position` is caller-supplied and unvalidated against ties.** The schema
 permits duplicates because curated ordering is meaningful (see DATABASE.md), and
-negatives are accepted because they still order. `PATCH` refuses blank content
-while `POST` accepts it, which is a deliberate asymmetry: blanking an existing
-statement corrupts a citation that facts already point at, whereas creating one
-has no citation to break.
+negatives are accepted because they still order.
 
-**Tests:** 34 API tests, plus repository coverage. Ordering, the document-mismatch
-404, cross-campaign refusal on every verb, and the paging bounds are all covered.
-The cross-campaign cases are the point: they are what a mocked repository cannot
-prove, since a stub returns whatever it is told.
+**Blank content is refused on create and update alike.** A statement is what a
+fact cites, so a blank one is not a lesser statement but an unverifiable
+citation. `min_length=1` rejects `""` at the schema and a strip check rejects
+whitespace in the use case. This was briefly asymmetric — refused on update only,
+on the reasoning that blanking a live citation is worse than creating a useless
+one — which turned out to be a hole rather than a distinction: a caller could
+`POST` a blank statement and then `PATCH` it into a citation. The check reads the
+content being written, not the stored content, so a reorder of a statement that
+already holds whitespace-only text still succeeds.
+
+**Tests:** 38 API tests, plus repository coverage. Ordering, the document-mismatch
+404, cross-campaign refusal on every verb, blank-content refusal on both verbs,
+and the paging bounds are all covered. The cross-campaign cases are the point:
+they are what a mocked repository cannot prove, since a stub returns whatever it
+is told.
 
 ---
 
